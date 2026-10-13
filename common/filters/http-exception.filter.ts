@@ -71,6 +71,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
       404: 'NOT_FOUND',
       409: 'CONFLICT',
       422: 'UNPROCESSABLE_ENTITY',
+      429: 'TOO_MANY_REQUESTS',
       500: 'INTERNAL_SERVER_ERROR',
     };
     return map[status] ?? 'ERROR';
