@@ -30,8 +30,6 @@ export class TenantRepository {
       { projection: { _id: 0 } },
     );
 
-    console.log("doc is ", doc)
-
     if (!doc) return null;
 
     return this.toConfigTypes(doc);

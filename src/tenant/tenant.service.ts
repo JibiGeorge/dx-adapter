@@ -55,7 +55,6 @@ export class TenantService {
     // 2. Cache miss — query MongoDB
     const startTime = Date.now();
     const tenant = await this.tenantRepository.findByTenantId(tenantId);
-    console.log("tenant", tenant)
     if (!tenant) {
       this.logger.warn(
         `Tenant not found: ${tenantId}`,
