@@ -8,7 +8,6 @@ import {
 import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
-import * as crypto from 'node:crypto';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 
 @Injectable()
@@ -18,7 +17,7 @@ export class ApiKeyGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly configService: ConfigService,
-  ) {}
+  ) { }
 
   canActivate(context: ExecutionContext): boolean {
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
@@ -49,7 +48,7 @@ export class ApiKeyGuard implements CanActivate {
       throw new UnauthorizedException('API key is not configured on the server');
     }
 
-    if (!this.isValidApiKey(clientKey.trim(), validApiKey.trim())) {
+    if (clientKey !== validApiKey) {
       this.logger.warn(`Invalid API key provided for request: ${request.method} ${request.url}`);
       throw new UnauthorizedException('Invalid API key');
     }
@@ -57,15 +56,8 @@ export class ApiKeyGuard implements CanActivate {
     return true;
   }
 
-  private isValidApiKey(clientKey: string, validApiKey: string): boolean {
-    const clientHash = crypto.createHash('sha256').update(clientKey).digest();
-    const validHash = crypto.createHash('sha256').update(validApiKey).digest();
-    return crypto.timingSafeEqual(clientHash, validHash);
-  }
-
   private isHealthCheck(request: Request): boolean {
     const path = (request.path || request.url || '').toLowerCase();
     return path.includes('healthcheck') || path.includes('/health');
   }
 }
-
