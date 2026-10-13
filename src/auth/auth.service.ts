@@ -20,6 +20,7 @@ import {
 import { LoggingService } from '../../common/logging/logging.service';
 import { HttpService } from '../../common/http/http.service';
 import { ForgetPasswordDto } from './dto/forget-password.dto';
+import { ResetPasswordOtpDto } from './dto/reset-password.dto';
 
 type Data = Record<string, any>;
 
@@ -30,7 +31,7 @@ export class AuthService {
     private readonly loggingService: LoggingService,
     private readonly jwtService: JwtService,
     private readonly httpService: HttpService,
-  ) {}
+  ) { }
 
   async authLogin(
     tenantId: string,
@@ -656,5 +657,86 @@ export class AuthService {
   <p>Regards,<br>Team ${appName}</p>
 </body>
 </html>`;
+  }
+
+  async resetPasswordOtp(tenantId: string, dto: ResetPasswordOtpDto): Promise<any> {
+    if (!tenantId?.trim()) {
+      throw new ServiceUnavailableException('Tenant identification is required.');
+    }
+
+    if (!dto.userName || !dto.otp || dto.newPassword || dto.confirmPassword || dto.token) {
+      throw new BadRequestException({
+        success: false,
+        message: 'All fields (User Name, OTP, New Password, Confirm Password, Token) are required.',
+      });
+    }
+
+    if (dto.newPassword !== dto.confirmPassword) {
+      return {
+        success: false,
+        message: 'New Password and Confirm Password do not match.',
+      };
+    }
+
+    // Complexity check: matches legacy IsComplexPassword
+    const hasUpper = /[A-Z]/.test(dto.newPassword);
+    const hasLower = /[a-z]/.test(dto.newPassword);
+    const specialChars = '%!@#$%^&*()?/>.<,:;\'\\|}{][~`+=–"-';
+    let hasSpecial = false;
+    for (const ch of specialChars) {
+      if (dto.newPassword.includes(ch)) {
+        hasSpecial = true;
+        break;
+      }
+    }
+
+    if (!hasUpper || !hasLower || !hasSpecial || dto.newPassword.length < 8) {
+      return {
+        success: false,
+        message: 'Password must contain at least 8 characters, with at least one uppercase letter, one lowercase letter, and one special character.',
+      };
+    }
+
+    const tenantConfig = await this.tenantService.getFullTenantById(tenantId);
+    const authUrl = tenantConfig.config.auth.api?.replace(/\/+$/, '');
+    const applicationId = String(tenantConfig.config.auth.appId);
+
+    if (!authUrl) {
+      throw new ServiceUnavailableException(
+        'Authentication service is not configured for this tenant.',
+      );
+    }
+
+    const resetResult = await this.postJson<any>(
+      `${authUrl}/ChangePassword/Email`,
+      {
+        applicationId,
+        userName: dto.userName,
+        emailId: dto.emailId,
+        otpToVerify: String(dto.otp).trim(),
+        newPassword: dto.newPassword,
+        encryptedToken: dto.token,
+      },
+      tenantId,
+    );
+
+    if (resetResult.isSuccess) {
+      return {
+        success: true,
+        message: 'Password changed successfully.',
+      };
+    }
+
+    if (resetResult.errorMessage?.toLowerCase() === 'incorrect_otp') {
+      return {
+        success: false,
+        message: 'Incorrect OTP. Please check the code and try again.',
+      };
+    }
+    return {
+      success: false,
+      message: 'Your password cannot be changed, please try again.',
+    };
+
   }
 }
