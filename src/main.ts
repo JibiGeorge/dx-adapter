@@ -38,6 +38,7 @@ async function bootstrap() {
       'api-key',
       'x-request-id',
       'x-correlation-id',
+      'x-tenant-id',
       'traceparent',
     ],
     credentials: true,

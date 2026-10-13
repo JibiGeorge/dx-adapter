@@ -7,5 +7,7 @@ import { AppCacheModule } from '../cache/cache.module';
     imports: [AppCacheModule],
     controllers: [TenantController],
     providers: [TenantService],
+    exports: [TenantService],
 })
 export class TenantModule {}
+

@@ -13,6 +13,8 @@ import { HttpLoggingInterceptor } from '../common/logging/http-logging.intercept
 import { HttpExceptionFilter } from '../common/filters/http-exception.filter.js';
 import { CacheModule } from '@nestjs/cache-manager';
 import { AppCacheModule } from './cache/cache.module';
+import { AuthModule } from './auth/auth.module';
+import { TenantIdGuard } from '../common/guards/tenant-id.guard';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -30,6 +32,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     LoggingModule,
     TenantModule,
     AppCacheModule,
+    AuthModule,
   ],
   controllers: [AppController],
   providers: [
@@ -48,6 +51,10 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     {
       provide: APP_GUARD,
       useClass: ApiKeyGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: TenantIdGuard,
     },
   ],
 })

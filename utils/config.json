@@ -22,6 +22,34 @@
         },
         "apis": {
             "authApi":{
+                "url": "https://uat-lawton-coreauth.lawtonasia.com",
+                "timeoutMs": 1000
+            }
+        }
+    },
+    {
+        "id": "2",
+        "tentantId": "MzAyNHxMYXd0b25Bc2lhIzIwMjZATW456",
+        "name": "MayFair",
+        "status": "Active",
+        "config": {
+            "name": "MayFair",
+            "domain": "mayfair.com",
+            "port": 3000,
+            "env": "prd",
+            "db": {
+                "host": "localhost",
+                "port": 3000,
+                "dbName": "mayfair"
+            }
+        },
+        "branding": {
+            "logoUrl": "https://component.mediassist.in/cdn/mayfair/LawtonAsia.jpeg",
+            "primaryColor": "#0066cc",
+            "secondaryColor": "#3399ff"
+        },
+        "apis": {
+            "authApi":{
                 "url": "",
                 "timeoutMs": 1000
             }
