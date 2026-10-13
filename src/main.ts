@@ -1,13 +1,23 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import cookieParser from 'cookie-parser';
-import { HttpExceptionFilter } from '../common/filters/http-exception.filter';
+import { HttpExceptionFilter } from '../common/filters/http-exception.filter.js';
 import { ValidationPipe } from '@nestjs/common';
 import { json, urlencoded } from 'express';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import { LoggingService } from '../common/logging/logging.service.js';
+import { RequestContextService } from '../common/logging/request-context.service.js';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bufferLogs: true,
+  });
+
+  const logger = app.get(LoggingService);
+  const requestContext = app.get(RequestContextService);
+
+  // Set centralized production-ready logger for NestJS runtime
+  app.useLogger(logger);
 
   // Disable technology fingerprinting
   app.disable('x-powered-by');
@@ -26,6 +36,9 @@ async function bootstrap() {
       'Authorization',
       'x-api-key',
       'api-key',
+      'x-request-id',
+      'x-correlation-id',
+      'traceparent',
     ],
     credentials: true,
     maxAge: 3600,
@@ -48,12 +61,12 @@ async function bootstrap() {
     }),
   );
 
-  app.useGlobalFilters(new HttpExceptionFilter());
+  app.useGlobalFilters(new HttpExceptionFilter(logger, requestContext));
 
   const port = process.env.PORT ?? 3001;
   await app.listen(port);
 
-  console.log(`Backend API (BFF) running on port ${port}`);
+  logger.log(`Backend API (BFF) running on port ${port}`, 'Bootstrap');
 }
 
 bootstrap();

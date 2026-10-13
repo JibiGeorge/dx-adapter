@@ -3,10 +3,14 @@ import { createObserveModule } from '@nestjs/observe';
 import { AppController } from './app.controller';
 import { ConfigModule } from '@nestjs/config';
 import { TenantModule } from './tenant/tenant.module';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ApiKeyGuard } from '../common/guards/api-key.guard';
 import { RateLimiterGuard } from '../common/guards/rate-limiter.guard';
 import { SecurityHeadersMiddleware } from '../common/middleware/security-headers.middleware';
+import { LoggingModule } from '../common/logging/logging.module.js';
+import { RequestContextMiddleware } from '../common/logging/request-context.middleware.js';
+import { HttpLoggingInterceptor } from '../common/logging/http-logging.interceptor.js';
+import { HttpExceptionFilter } from '../common/filters/http-exception.filter.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -16,10 +20,19 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
       isGlobal: true,
       envFilePath: ['.env.local', '.env'],
     }),
+    LoggingModule,
     TenantModule,
   ],
   controllers: [AppController],
   providers: [
+    {
+      provide: APP_FILTER,
+      useClass: HttpExceptionFilter,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: HttpLoggingInterceptor,
+    },
     {
       provide: APP_GUARD,
       useClass: RateLimiterGuard,
@@ -32,8 +45,11 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
-    consumer.apply(SecurityHeadersMiddleware).forRoutes('*');
+    consumer
+      .apply(RequestContextMiddleware, SecurityHeadersMiddleware)
+      .forRoutes('*');
   }
 }
+
 
 
