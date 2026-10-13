@@ -1,0 +1,30 @@
+[
+    {
+        "id": "1",
+        "tentantId": "MzAyNHxMYXd0b25Bc2lhIzIwMjZATWF5",
+        "name": "Lawton Asia",
+        "status": "Active",
+        "config": {
+            "name": "Lawton Asia",
+            "domain": "lawtonasia.com",
+            "port": 3000,
+            "env": "prd",
+            "db": {
+                "host": "localhost",
+                "port": 3000,
+                "dbName": "lawtonasia"
+            }
+        },
+        "branding": {
+            "logoUrl": "https://component.mediassist.in/cdn/mayfair/LawtonAsia.jpeg",
+            "primaryColor": "#0066cc",
+            "secondaryColor": "#3399ff"
+        },
+        "apis": {
+            "authApi":{
+                "url": "",
+                "timeoutMs": 1000
+            }
+        }
+    }
+]
