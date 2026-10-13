@@ -15,13 +15,25 @@ const config: Config = {
   rootDir: '.',
   testRegex: '.*\\.spec\\.ts$',
   transform: {
-    '^.+\\.(t|j)s$': 'ts-jest',
+    '^.+\\.(t|j)s$': [
+      'ts-jest',
+      {
+        // Override to CommonJS for test-runner compatibility with NodeNext source
+        tsconfig: {
+          module: 'CommonJS',
+          moduleResolution: 'Node',
+        },
+      },
+    ],
   },
-  moduleNameMapper: pathsToModuleNameMapper(paths, { prefix: '<rootDir>/' }),
+  // Resolve .js extensions back to source .ts files (NodeNext ESM compat in tests)
+  moduleNameMapper: {
+    ...pathsToModuleNameMapper(paths, { prefix: '<rootDir>/' }),
+    '^(\\.{1,2}/.*)\\.js$': '$1',
+  },
   collectCoverageFrom: [
     'src/**/*.(t|j)s',
-    'libs/**/*.(t|j)s',
-    'apps/**/*.(t|j)s',
+    'common/**/*.(t|j)s',
   ],
   coverageDirectory: './coverage',
   testEnvironment: 'node',
