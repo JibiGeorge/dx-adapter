@@ -11,6 +11,8 @@ import { LoggingModule } from '../common/logging/logging.module.js';
 import { RequestContextMiddleware } from '../common/logging/request-context.middleware.js';
 import { HttpLoggingInterceptor } from '../common/logging/http-logging.interceptor.js';
 import { HttpExceptionFilter } from '../common/filters/http-exception.filter.js';
+import { CacheModule } from '@nestjs/cache-manager';
+import { AppCacheModule } from './cache/cache.module';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -20,8 +22,14 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
       isGlobal: true,
       envFilePath: ['.env.local', '.env'],
     }),
+    CacheModule.register({
+      isGlobal: true,
+      ttl: 300_000, // 5 minutes, in milliseconds
+      max: 1000, // maximum number of cached entries
+    }),
     LoggingModule,
     TenantModule,
+    AppCacheModule,
   ],
   controllers: [AppController],
   providers: [

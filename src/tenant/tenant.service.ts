@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { LoggingService } from '../../common/logging/logging.service.js';
 import { RequestContextService } from '../../common/logging/request-context.service.js';
+import { AppCacheService } from '../cache/app-cache.service.js';
 
 export interface TenantConfig {
   id: string;
@@ -14,23 +15,11 @@ export interface TenantConfig {
     name: string;
     domain: string;
     port: number;
-    env: string;
-    db: {
-      host: string;
-      port: number;
-      dbName: string;
-    };
   };
   branding: {
     logoUrl: string;
     primaryColor: string;
     secondaryColor: string;
-  };
-  apis: {
-    authApi: {
-      url: string;
-      timeoutMs: number;
-    };
   };
 }
 
@@ -39,6 +28,7 @@ export class TenantService {
   constructor(
     private readonly logger: LoggingService,
     private readonly requestContext: RequestContextService,
+    private readonly cache: AppCacheService,
   ) {}
 
   private getConfigFilePath(): string {
@@ -69,6 +59,27 @@ export class TenantService {
     }
   }
 
+  
+private selectTenantConfig(tenant: TenantConfig): TenantConfig {
+  return {
+    id: tenant.id,
+    tentantId: tenant.tentantId,
+    name: tenant.name,
+    status: tenant.status,
+    config: {
+      name: tenant.config.name,
+      domain: tenant.config.domain,
+      port: tenant.config.port,
+    },
+    branding: {
+      logoUrl: tenant.branding.logoUrl,
+      primaryColor: tenant.branding.primaryColor,
+      secondaryColor: tenant.branding.secondaryColor,
+    },
+  };
+}
+
+
   async getTenantconfigById(id: string): Promise<TenantConfig> {
     const startTime = Date.now();
     this.logger.debug(
@@ -76,6 +87,25 @@ export class TenantService {
       'TenantService',
       { requestedId: id },
     );
+
+    const cacheKey = `tenant:${id}:config`;
+    
+    // 1. Check the in-memory cache.
+    const cached = await this.cache.get<TenantConfig>(cacheKey);
+
+    if (cached !== undefined) {
+      this.logger.log(
+        `Tenant configuration retrieved from cache for '${cached.name}'`,
+        'TenantService',
+        {
+          tenantId: cached.tentantId,
+          tenantName: cached.name,
+          status: cached.status,
+          cached: true,
+        },
+      );
+      return cached;
+    }
 
     const tenants = await this.loadConfig();
     const tenant = tenants.find(
@@ -96,6 +126,8 @@ export class TenantService {
     // Set validated tenant ID in request correlation context
     this.requestContext.setTenantId(tenant.tentantId);
 
+    await this.cache.set(cacheKey, tenant, 300_000);
+
     // Securely log non-sensitive operational metadata (never credentials, DB info, or full config)
     this.logger.log(
       `Tenant configuration retrieved successfully for '${tenant.name}' [${durationMs}ms]`,
@@ -108,6 +140,6 @@ export class TenantService {
       },
     );
 
-    return tenant;
+    return this.selectTenantConfig(tenant);
   }
-}
+}
