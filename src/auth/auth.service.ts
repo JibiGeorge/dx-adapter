@@ -39,10 +39,17 @@ export class AuthService {
     password: string,
   ): Promise<AuthResponse | AuthSessionResponse> {
     if (!tenantId?.trim()) {
+      this.loggingService.warn('Login rejected: missing tenant identification');
       throw new ServiceUnavailableException(
         'Tenant identification is required.',
       );
     }
+
+    this.loggingService.log(
+      `Login attempt for user: ${username}`,
+      'AuthService',
+      { tenantId, username },
+    );
 
     const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(tenantId.trim());
 
@@ -50,6 +57,11 @@ export class AuthService {
     const appId = String(tenantConfig.config.auth.appId);
 
     if (!authUrl) {
+      this.loggingService.error(
+        `Authentication API URL is not configured for tenant ${tenantId}`,
+        'AuthService',
+        { tenantId },
+      );
       throw new ServiceUnavailableException(
         'Authentication service is not configured for this tenant.',
       );
@@ -71,6 +83,11 @@ export class AuthService {
     );
 
     if (!this.isAuthResponse(authData)) {
+      this.loggingService.error(
+        `Invalid auth response structure received for tenant ${tenantId}`,
+        'AuthService',
+        { tenantId, username },
+      );
       throw new BadGatewayException(
         'The authentication service returned an unexpected response.',
       );
@@ -78,8 +95,15 @@ export class AuthService {
 
     // Preserve business-level authentication failures.
     if (!authData.isSuccess) {
-      this.loggingService.debug(
-        `Authentication failed for tenant ${tenantId}.`,
+      this.loggingService.warn(
+        `Authentication failed for user: ${username}`,
+        'AuthService',
+        {
+          tenantId,
+          username,
+          errorMessage: (authData as any).errorMessage,
+          errorDescription: (authData as any).errorDescription,
+        },
       );
 
       return authData;
@@ -88,6 +112,11 @@ export class AuthService {
     const accessToken = authData.accessToken.access_token;
 
     if (!accessToken) {
+      this.loggingService.error(
+        `Missing access token in successful authentication response for tenant ${tenantId}`,
+        'AuthService',
+        { tenantId, username },
+      );
       throw new BadGatewayException(
         'The authentication service did not return an access token.',
       );
@@ -104,6 +133,11 @@ export class AuthService {
     );
 
     if (!this.isRecord(profile)) {
+      this.loggingService.error(
+        `Invalid profile response received for user: ${username}`,
+        'AuthService',
+        { tenantId, username },
+      );
       throw new BadGatewayException(
         'The profile service returned an unexpected response.',
       );
@@ -373,12 +407,18 @@ export class AuthService {
     // Step 10: Generate the application's session JWT.
     const token = await this.jwtService.signAsync(payload);
 
-    this.loggingService.debug(
-      `Login completed for tenant ${tenantId}; ` +
-      `corpId=${providerCorpId}; ` +
-      `groupCorpId=${providerGroupCorpId}; ` +
-      `role=${firstRoleName}; ` +
-      `isBroker=${isBroker}`,
+    this.loggingService.log(
+      `Login successful for user: ${loginName} (userId: ${userId})`,
+      'AuthService',
+      {
+        tenantId,
+        userId,
+        loginName,
+        portal: loginScope,
+        corpId: providerCorpId,
+        groupCorpId: providerGroupCorpId,
+        role: firstRoleName,
+      },
     );
 
     // Step 11: Return the application session response.
@@ -502,6 +542,7 @@ export class AuthService {
 
   async forgetPassword(tenantId: string, dto: ForgetPasswordDto): Promise<ForgetPasswordResult> {
     if (!tenantId?.trim()) {
+      this.loggingService.warn('Forget password rejected: missing tenant identification');
       throw new ServiceUnavailableException('Tenant identification is required.');
     }
 
@@ -509,11 +550,22 @@ export class AuthService {
     const queryEmail = String(dto.emailId || '').trim();
 
     if (!queryUser && !queryEmail) {
+      this.loggingService.warn(
+        'Forget password rejected: missing username and email',
+        'AuthService',
+        { tenantId },
+      );
       throw new BadRequestException({
         success: false,
         message: 'Please input either of values (User name or Email Id).',
       });
     }
+
+    this.loggingService.log(
+      `Forget password initiated for user: ${queryUser || queryEmail}`,
+      'AuthService',
+      { tenantId, userName: queryUser, hasEmail: Boolean(queryEmail) },
+    );
 
     const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(tenantId.trim());
 
@@ -522,6 +574,11 @@ export class AuthService {
     const appName = tenantConfig.config.app?.name || 'Application';
 
     if (!authUrl) {
+      this.loggingService.error(
+        `Authentication API URL is not configured for tenant ${tenantId}`,
+        'AuthService',
+        { tenantId },
+      );
       throw new ServiceUnavailableException(
         'Authentication service is not configured for this tenant.',
       );
@@ -542,6 +599,11 @@ export class AuthService {
       findData.errorMessage === 'Multiple_User_Found' ||
       (Array.isArray(findData.userNames) && findData.userNames.length > 1)
     ) {
+      this.loggingService.warn(
+        `Multiple users found during forget-password lookup`,
+        'AuthService',
+        { tenantId, userCount: findData.userNames?.length },
+      );
       return {
         success: false,
         multipleUsers: true,
@@ -552,6 +614,11 @@ export class AuthService {
     }
 
     if (findData.errorMessage === 'Account_Locked') {
+      this.loggingService.warn(
+        `Account locked during forget-password lookup: ${queryUser || queryEmail}`,
+        'AuthService',
+        { tenantId, queryUser },
+      );
       return {
         success: false,
         message: 'Your account has been locked, please try after 20 mins.',
@@ -561,6 +628,11 @@ export class AuthService {
     const resolvedUserName = findData.loginName || findData.LoginName || queryUser;
 
     if (!findData.isSuccess && !findData.loginName && !findData.LoginName) {
+      this.loggingService.warn(
+        `User not found during forget-password lookup: ${queryUser || queryEmail}`,
+        'AuthService',
+        { tenantId },
+      );
       return {
         success: false,
         message: 'No user exists with such username/emailid.',
@@ -570,6 +642,11 @@ export class AuthService {
     const resolvedEmail = findData.emailId || findData.EmailId || queryEmail;
 
     if (!resolvedEmail) {
+      this.loggingService.warn(
+        `No registered email for user account: ${resolvedUserName}`,
+        'AuthService',
+        { tenantId, userName: resolvedUserName },
+      );
       return {
         success: false,
         message:
@@ -595,6 +672,12 @@ export class AuthService {
     if (otpData.isSuccess) {
       const maskedEmail = this.maskEmail(resolvedEmail);
 
+      this.loggingService.log(
+        `OTP sent successfully for forget-password: ${resolvedUserName}`,
+        'AuthService',
+        { tenantId, userName: resolvedUserName, maskedEmail },
+      );
+
       return {
         success: true,
         token: otpData.encryptedToken,
@@ -606,12 +689,23 @@ export class AuthService {
     }
 
     if (otpData.errorMessage?.toLowerCase() === 'otp_already_sent') {
+      this.loggingService.warn(
+        `OTP already sent recently for user: ${resolvedUserName}`,
+        'AuthService',
+        { tenantId, userName: resolvedUserName },
+      );
       return {
         success: false,
         message:
           "Sorry, OTP already sent, password reset doesn't work now. Please try again after 2 minutes.",
       };
     }
+
+    this.loggingService.warn(
+      `Failed to send forget-password OTP for user: ${resolvedUserName}`,
+      'AuthService',
+      { tenantId, userName: resolvedUserName, error: otpData.errorMessage },
+    );
 
     return {
       success: false,
@@ -661,10 +755,16 @@ export class AuthService {
 
   async resetPasswordOtp(tenantId: string, dto: ResetPasswordOtpDto): Promise<any> {
     if (!tenantId?.trim()) {
+      this.loggingService.warn('Reset password rejected: missing tenant identification');
       throw new ServiceUnavailableException('Tenant identification is required.');
     }
 
-    if (!dto.userName || !dto.otp || dto.newPassword || dto.confirmPassword || dto.token) {
+    if (!dto.userName || !dto.otp || !dto.newPassword || !dto.confirmPassword || !dto.token) {
+      this.loggingService.warn(
+        'Reset password rejected: missing required fields',
+        'AuthService',
+        { tenantId, userName: dto.userName },
+      );
       throw new BadRequestException({
         success: false,
         message: 'All fields (User Name, OTP, New Password, Confirm Password, Token) are required.',
@@ -672,6 +772,11 @@ export class AuthService {
     }
 
     if (dto.newPassword !== dto.confirmPassword) {
+      this.loggingService.warn(
+        'Reset password rejected: password mismatch',
+        'AuthService',
+        { tenantId, userName: dto.userName },
+      );
       return {
         success: false,
         message: 'New Password and Confirm Password do not match.',
@@ -691,17 +796,33 @@ export class AuthService {
     }
 
     if (!hasUpper || !hasLower || !hasSpecial || dto.newPassword.length < 8) {
+      this.loggingService.warn(
+        'Reset password rejected: password complexity requirements not met',
+        'AuthService',
+        { tenantId, userName: dto.userName },
+      );
       return {
         success: false,
         message: 'Password must contain at least 8 characters, with at least one uppercase letter, one lowercase letter, and one special character.',
       };
     }
 
-    const tenantConfig = await this.tenantService.getFullTenantById(tenantId);
+    this.loggingService.log(
+      `Attempting OTP password reset for user: ${dto.userName}`,
+      'AuthService',
+      { tenantId, userName: dto.userName },
+    );
+
+    const tenantConfig = await this.tenantService.getFullTenantById(tenantId.trim());
     const authUrl = tenantConfig.config.auth.api?.replace(/\/+$/, '');
     const applicationId = String(tenantConfig.config.auth.appId);
 
     if (!authUrl) {
+      this.loggingService.error(
+        `Authentication API URL is not configured for tenant ${tenantId}`,
+        'AuthService',
+        { tenantId },
+      );
       throw new ServiceUnavailableException(
         'Authentication service is not configured for this tenant.',
       );
@@ -721,6 +842,11 @@ export class AuthService {
     );
 
     if (resetResult.isSuccess) {
+      this.loggingService.log(
+        `Password reset successful for user: ${dto.userName}`,
+        'AuthService',
+        { tenantId, userName: dto.userName },
+      );
       return {
         success: true,
         message: 'Password changed successfully.',
@@ -728,15 +854,26 @@ export class AuthService {
     }
 
     if (resetResult.errorMessage?.toLowerCase() === 'incorrect_otp') {
+      this.loggingService.warn(
+        `Password reset failed: incorrect OTP for user: ${dto.userName}`,
+        'AuthService',
+        { tenantId, userName: dto.userName },
+      );
       return {
         success: false,
         message: 'Incorrect OTP. Please check the code and try again.',
       };
     }
+
+    this.loggingService.warn(
+      `Password reset failed for user: ${dto.userName}`,
+      'AuthService',
+      { tenantId, userName: dto.userName, error: resetResult.errorMessage },
+    );
+
     return {
       success: false,
       message: 'Your password cannot be changed, please try again.',
     };
-
   }
 }
