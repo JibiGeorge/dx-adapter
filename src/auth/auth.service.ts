@@ -38,7 +38,7 @@ export class AuthService {
         }
 
         // 3. Validate the tenant's authentication API configuration.
-        const authUrl = tenantConfig.apis?.authApi?.url;
+        const authUrl = tenantConfig.config.auth.api;
 
         if (!authUrl) {
             this.loggingService.error(`Authentication API URL is missing for tenant: ${tenantId}`);

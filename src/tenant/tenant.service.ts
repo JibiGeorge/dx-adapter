@@ -1,18 +1,15 @@
-
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import * as fs from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import * as path from 'node:path';
 
 import { LoggingService } from '../../common/logging/logging.service.js';
 import { RequestContextService } from '../../common/logging/request-context.service.js';
 import { AppCacheService } from '../cache/app-cache.service.js';
+import { TenantRepository } from '../database/repositories/tenant.repository.js';
 import {
   TenantConfigTypes,
   TenantPublicResponse,
 } from './tenant.types.js';
 
-// Re-export for backwards compatibility with other modules importing TenantConfig
+// Re-export for backwards compatibility with other modules importing TenantConfigTypes
 export type { TenantConfigTypes };
 
 @Injectable()
@@ -21,186 +18,109 @@ export class TenantService {
     private readonly logger: LoggingService,
     private readonly requestContext: RequestContextService,
     private readonly cache: AppCacheService,
+    private readonly tenantRepository: TenantRepository,
   ) { }
 
-  private getConfigFilePath(): string {
-    const cwdPath = path.resolve(
-      process.cwd(),
-      'utils',
-      'config.json',
-    );
+  // ─── Private helpers ──────────────────────────────────────────────────────────
 
-    if (existsSync(cwdPath)) {
-      return cwdPath;
-    }
-
-    const relPath = path.resolve(
-      __dirname,
-      '../../../utils/config.json',
-    );
-
-    if (existsSync(relPath)) {
-      return relPath;
-    }
-
-    return cwdPath;
-  }
-
-  private async loadConfig(): Promise<TenantConfigTypes[]> {
-    const filePath = this.getConfigFilePath();
-
-    try {
-      const fileData = await fs.readFile(filePath, 'utf-8');
-      return JSON.parse(fileData) as TenantConfigTypes[];
-    } catch (error) {
-      this.logger.error(
-        `Failed to read tenant config file from ${filePath}`,
-        error instanceof Error ? error.stack : undefined,
-        'TenantService',
-        { filePath },
-      );
-      throw error;
-    }
-  }
-
-  // Return only the public-safe fields in API responses.
-  private toPublicResponse(tenant: TenantConfigTypes): TenantPublicResponse {
+  /** Return only public-safe fields — never exposes DB credentials or API secrets */
+  private toPublicResponse(
+    tenant: TenantConfigTypes,
+  ): TenantPublicResponse {
     return {
-      id: tenant.id,
-      tentantId: tenant.tentantId,
-      name: tenant.name,
       status: tenant.status,
+      tenantId: tenant.tenantId,
+      domains: tenant.domains,
+      version: tenant.version,
       config: {
-        name: tenant.config.name,
-        domain: tenant.config.domain,
-        port: tenant.config.port,
-      },
-      branding: {
-        logoUrl: tenant.branding.logoUrl,
-        primaryColor: tenant.branding.primaryColor,
-        secondaryColor: tenant.branding.secondaryColor,
+        app: {
+          name: tenant.config.app.name,
+          url: tenant.config.app.url,
+          serviceUrl: tenant.config.app.serviceUrl,
+        },
       },
     };
   }
 
-  /**
-   * Returns the COMPLETE cached tenant object (including internal fields like apis, db).
-   * Intended for internal service-to-service use only — never expose this directly in API responses.
-   * Throws NotFoundException if the tenant has not been resolved yet (cache miss).
-   */
-  async getFullTenantById(tenantId: string): Promise<TenantConfigTypes> {
-    if (!tenantId?.trim()) {
-      throw new BadRequestException('Tenant ID is required');
-    }
-
+  /** Shared lookup: cache → MongoDB. Populates cache on miss. */
+  private async resolveTenant(tenantId: string): Promise<TenantConfigTypes> {
     const cacheKey = `tenant:${tenantId}:config`;
-    const cached = await this.cache.get<TenantConfigTypes>(cacheKey);
 
+    // 1. Cache hit
+    const cached = await this.cache.get<TenantConfigTypes>(cacheKey);
     if (cached) {
       return cached;
     }
 
-    // Cache miss: load from file and populate cache
+    // 2. Cache miss — query MongoDB
     const startTime = Date.now();
-    const tenants = await this.loadConfig();
-    const tenant = tenants.find(
-      (t) => t.tentantId === tenantId || t.tentantId === tenantId,
-    );
-
+    const tenant = await this.tenantRepository.findByTenantId(tenantId);
+    console.log("tenant", tenant)
     if (!tenant) {
       this.logger.warn(
-        `Tenant not found for internal lookup: ${tenantId}`,
+        `Tenant not found: ${tenantId}`,
         'TenantService',
         { tenantId, durationMs: Date.now() - startTime },
       );
       throw new NotFoundException(`Tenant with ID '${tenantId}' not found`);
     }
 
+    // 3. Populate cache with full object (TTL: 5 minutes)
     await this.cache.set(cacheKey, tenant, 300_000);
     return tenant;
   }
 
-  async getTenantconfigById(
-    id: string,
-  ): Promise<TenantPublicResponse> {
+  // ─── Public API ───────────────────────────────────────────────────────────────
 
+  /**
+   * Returns the COMPLETE tenant object including internal fields (APIs, DB creds).
+   * For internal service-to-service use only — never expose directly in API responses.
+   */
+  async getFullTenantById(tenantId: string): Promise<TenantConfigTypes> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('Tenant ID is required');
+    }
+    return this.resolveTenant(tenantId.trim());
+  }
+
+  /**
+   * Returns only the public-safe tenant config fields.
+   * Used by the /tenant/config endpoint.
+   */
+  async getTenantconfigById(id: string): Promise<TenantPublicResponse> {
     if (!id?.trim()) {
       throw new BadRequestException('Tenant ID is required in x-tenant-id header');
     }
 
     const startTime = Date.now();
-    const cacheKey = `tenant:${id}:config`;
+    const tenantId = id.trim();
 
     this.logger.debug(
-      `Starting tenant configuration lookup for ID: ${id}`,
+      `Tenant configuration lookup for ID: ${tenantId}`,
       'TenantService',
-      { requestedId: id },
+      { requestedId: tenantId },
     );
 
-    // 1. Check the cache, which stores the complete tenant object.
-    const cached = await this.cache.get<TenantConfigTypes>(cacheKey);
+    const tenant = await this.resolveTenant(tenantId);
 
-    if (cached !== undefined && cached !== null) {
-      this.requestContext.setTenantId(cached.tentantId);
-
-      this.logger.log(
-        `Tenant configuration retrieved from cache for '${cached.name}'`,
-        'TenantService',
-        {
-          tenantId: cached.tentantId,
-          tenantName: cached.name,
-          status: cached.status,
-          cached: true,
-          durationMs: Date.now() - startTime,
-        },
-      );
-
-      // Return only the approved fields.
-      return this.toPublicResponse(cached);
-    }
-
-    // 2. Cache miss: load the full tenant data.
-    const tenants = await this.loadConfig();
-
-    const tenant = tenants.find(
-      (t) => t.tentantId === id || t.tentantId === id,
-    );
-
-    if (!tenant) {
-      const durationMs = Date.now() - startTime;
-
-      this.logger.warn(
-        `Tenant configuration lookup failed for ID: ${id}`,
-        'TenantService',
-        { requestedId: id, durationMs },
-      );
-
-      throw new NotFoundException(
-        `Tenant with ID '${id}' not found`,
-      );
-    }
-
-    // 3. Set the validated tenant ID in request context.
-    this.requestContext.setTenantId(tenant.tentantId);
-
-    // 4. Cache the COMPLETE tenant object, including extra fields.
-    await this.cache.set(cacheKey, tenant, 300_000);
+    // Set validated tenant ID in request correlation context
+    this.requestContext.setTenantId(tenant.tenantId);
 
     const durationMs = Date.now() - startTime;
+    const fromCache = (await this.cache.get(`tenant:${tenantId}:config`)) !== undefined;
 
     this.logger.log(
-      `Tenant configuration retrieved successfully for '${tenant.name}'`,
+      `Tenant configuration resolved for '${tenant.config.app.name}'`,
       'TenantService',
       {
-        tenantId: tenant.tentantId,
-        tenantName: tenant.name,
+        tenantId: tenant.tenantId,
+        tenantName: tenant.config.app.name,
         status: tenant.status,
-        cached: false,
+        cached: fromCache,
         durationMs,
       },
     );
 
-    // 5. Return ONLY the approved fields.
     return this.toPublicResponse(tenant);
   }
 }

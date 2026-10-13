@@ -1,65 +1,126 @@
-// ─── Internal (full) types — used server-side only, never returned to clients ──
+// ─── Shared types ────────────────────────────────────────────────────────────
 
-export interface TenantDbConfig {
+export type TenantStatus = 'active' | 'inactive' | 'suspended';
+
+export interface TenantSmtpConfig {
+  [key: string]: unknown;
+}
+
+export interface TenantPasswordResetConfig {
+  [key: string]: unknown;
+}
+
+export interface TenantEmailConfig {
+  fromEmailId: string;
+  smtp: TenantSmtpConfig;
+  passwordReset: TenantPasswordResetConfig;
+}
+
+export interface TenantSmsConfig {
+  templates: Record<string, unknown>;
+}
+
+// ─── Application configuration ──────────────────────────────────────────────
+
+export interface TenantAppConfig {
+  name: string;
+  url: string;
+  serviceUrl: string;
+}
+
+export interface TenantAuthConfig {
+  api: string;
+  appId: number;
+}
+
+export interface TenantServicesConfig {
+  memberConfig: string;
+  ecard: string;
+  memberPolicy: string;
+}
+
+export interface TenantClaimApisConfig {
+  v1: string;
+  v1Lawton: string;
+  v2: string;
+  v2Key: string;
+  v3: string;
+  pairKey: string;
+}
+
+export interface TenantDatabaseConfig {
+  type: 'mssql' | 'mongodb' | string;
   host: string;
   port: number;
+  user: string;
+  password: string;
+  name: string;
+}
+
+export interface TenantMemberConfigDb {
+  uri: string;
   dbName: string;
 }
 
-export interface TenantAuthApiConfig {
-  url: string;
-  timeoutMs: number;
+export interface TenantAuraHealthConfig {
+  orgCode: string;
+  webhookLink: string;
 }
 
-export interface TenantApisConfig {
-  authApi: TenantAuthApiConfig;
-}
+// ─── Full internal configuration ────────────────────────────────────────────
 
-/** Full server-side config — includes DB credentials and internal API config */
+/**
+ * Complete tenant configuration.
+ * Internal server-side only.
+ *
+ * Contains credentials, API keys, connection strings and internal URLs.
+ * Never return this object directly from a public controller.
+ */
 export interface TenantInternalConfig {
-  name: string;
-  domain: string;
-  port: number;
-  env: string;
-  db: TenantDbConfig;
+  app: TenantAppConfig;
+  auth: TenantAuthConfig;
+  services: TenantServicesConfig;
+  claimApis: TenantClaimApisConfig;
+  database: TenantDatabaseConfig;
+  memberConfigDb: TenantMemberConfigDb;
+  email: TenantEmailConfig;
+  sms: TenantSmsConfig;
+  auraHealth: TenantAuraHealthConfig;
 }
 
-export interface TenantBranding {
-  logoUrl: string;
-  primaryColor: string;
-  secondaryColor: string;
-}
-
-/** Full tenant record stored in config.json and cached internally */
+/**
+ * Full tenant record returned by the configuration provider
+ * and stored in the internal cache.
+ */
 export interface TenantConfigTypes {
-  id: string;
-  tentantId: string;
-  name: string;
   status: TenantStatus;
+  tenantId: string;
+  domains: string[];
+  version: number;
   config: TenantInternalConfig;
-  branding: TenantBranding;
-  apis: TenantApisConfig;
 }
 
-// ─── Public (safe) types — returned from API responses ────────────────────────
+// ─── Public configuration ───────────────────────────────────────────────────
 
-/** Subset of config safe to return to clients — no DB, no internal env, no API secrets */
+/**
+ * Safe application configuration exposed to clients.
+ * Add only fields that are intended to be public.
+ */
 export interface TenantPublicConfig {
-  name: string;
-  domain: string;
-  port: number;
+  app: {
+    name: string;
+    url: string;
+    serviceUrl: string;
+  };
 }
 
-/** Tenant data shape returned in API responses */
+/**
+ * Tenant data returned by the public tenant-config endpoint.
+ */
 export interface TenantPublicResponse {
-  id: string;
-  tentantId: string;
-  name: string;
   status: TenantStatus;
+  tenantId: string;
+  domains: string[];
+  version: number;
   config: TenantPublicConfig;
-  branding: TenantBranding;
 }
-
-// ─── Enums / Literals ─────────────────────────────────────────────────────────
-
-export type TenantStatus = 'Active' | 'Inactive' | 'Suspended';
