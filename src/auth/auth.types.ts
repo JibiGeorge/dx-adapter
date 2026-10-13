@@ -204,3 +204,30 @@ export interface AuthSessionResponse {
   token: string;
   user: AuthSessionUser;
 }
+
+export interface ForgetPasswordResult {
+  success: boolean;
+  message: string;
+  multipleUsers?: boolean;
+  userNames?: string[];
+  token?: string;
+  maskedEmail?: string;
+  userName?: string;
+  emailId?: string;
+}
+
+export interface FindUserResponse {
+  isSuccess?: boolean;
+  errorMessage?: string;
+  loginName?: string;
+  LoginName?: string;
+  emailId?: string;
+  EmailId?: string;
+  userNames?: string[];
+}
+
+export interface SendOtpResponse {
+  isSuccess?: boolean;
+  encryptedToken?: string;
+  errorMessage?: string;
+}

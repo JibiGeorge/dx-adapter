@@ -1,5 +1,6 @@
 import {
   BadGatewayException,
+  BadRequestException,
   Injectable,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -10,12 +11,15 @@ import { TenantConfigTypes } from '../tenant/tenant.types';
 import {
   AuthResponse,
   AuthSessionResponse,
+  FindUserResponse,
+  ForgetPasswordResult,
   ProfileOverrides,
+  SendOtpResponse,
   UserSessionPayload,
 } from './auth.types';
 import { LoggingService } from '../../common/logging/logging.service';
-
-const AUTH_API_TIMEOUT_MS = 10_000;
+import { HttpService } from '../../common/http/http.service';
+import { ForgetPasswordDto } from './dto/forget-password.dto';
 
 type Data = Record<string, any>;
 
@@ -25,6 +29,7 @@ export class AuthService {
     private readonly tenantService: TenantService,
     private readonly loggingService: LoggingService,
     private readonly jwtService: JwtService,
+    private readonly httpService: HttpService,
   ) {}
 
   async authLogin(
@@ -38,8 +43,7 @@ export class AuthService {
       );
     }
 
-    const tenantConfig: TenantConfigTypes =
-      await this.tenantService.getFullTenantById(tenantId.trim());
+    const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(tenantId.trim());
 
     const authUrl = tenantConfig.config.auth.api?.replace(/\/+$/, '');
     const appId = String(tenantConfig.config.auth.appId);
@@ -395,57 +399,12 @@ export class AuthService {
     };
   }
 
-  private async postJson(
+  private async postJson<T = unknown>(
     url: string,
     body: Record<string, unknown>,
     tenantId: string,
-  ): Promise<unknown> {
-    let response: Response;
-
-    try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(AUTH_API_TIMEOUT_MS),
-      });
-    } catch (error: unknown) {
-      const reason =
-        error instanceof Error ? error.name : 'UnknownError';
-
-      this.loggingService.error(
-        `Upstream request failed for tenant ${tenantId}. Reason: ${reason}`,
-      );
-
-      throw new ServiceUnavailableException(
-        'An upstream authentication service is temporarily unavailable.',
-      );
-    }
-
-    let data: unknown;
-
-    try {
-      data = await response.json();
-    } catch {
-      throw new BadGatewayException(
-        'An upstream service returned invalid JSON.',
-      );
-    }
-
-    if (!response.ok) {
-      this.loggingService.error(
-        `Upstream request returned HTTP ${response.status} for tenant ${tenantId}.`,
-      );
-
-      throw new BadGatewayException(
-        'An upstream service could not process the request.',
-      );
-    }
-
-    return data;
+  ): Promise<T> {
+    return this.httpService.post<T>(url, body, { tenantId });
   }
 
   private getProp(
@@ -538,5 +497,164 @@ export class AuthService {
     void scope;
 
     return {};
+  }
+
+  async forgetPassword(tenantId: string, dto: ForgetPasswordDto): Promise<ForgetPasswordResult> {
+    if (!tenantId?.trim()) {
+      throw new ServiceUnavailableException('Tenant identification is required.');
+    }
+
+    const queryUser = String(dto.selectedUserName || dto.userName || '').trim();
+    const queryEmail = String(dto.emailId || '').trim();
+
+    if (!queryUser && !queryEmail) {
+      throw new BadRequestException({
+        success: false,
+        message: 'Please input either of values (User name or Email Id).',
+      });
+    }
+
+    const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(tenantId.trim());
+
+    const authUrl = tenantConfig.config.auth.api?.replace(/\/+$/, '');
+    const applicationId = String(tenantConfig.config.auth.appId);
+    const appName = tenantConfig.config.app?.name || 'Application';
+
+    if (!authUrl) {
+      throw new ServiceUnavailableException(
+        'Authentication service is not configured for this tenant.',
+      );
+    }
+
+    // 1. Locate the user.
+    const findData = await this.postJson<FindUserResponse>(
+      `${authUrl}/Search/FindUser`,
+      {
+        emailId: queryEmail,
+        userName: queryUser,
+        applicationId,
+      },
+      tenantId,
+    );
+
+    if (
+      findData.errorMessage === 'Multiple_User_Found' ||
+      (Array.isArray(findData.userNames) && findData.userNames.length > 1)
+    ) {
+      return {
+        success: false,
+        multipleUsers: true,
+        userNames: findData.userNames ?? [],
+        message:
+          'Multiple user names exist with the given mail id. Please select the user name from the drop down.',
+      };
+    }
+
+    if (findData.errorMessage === 'Account_Locked') {
+      return {
+        success: false,
+        message: 'Your account has been locked, please try after 20 mins.',
+      };
+    }
+
+    const resolvedUserName = findData.loginName || findData.LoginName || queryUser;
+
+    if (!findData.isSuccess && !findData.loginName && !findData.LoginName) {
+      return {
+        success: false,
+        message: 'No user exists with such username/emailid.',
+      };
+    }
+
+    const resolvedEmail = findData.emailId || findData.EmailId || queryEmail;
+
+    if (!resolvedEmail) {
+      return {
+        success: false,
+        message:
+          'No registered email found for this user account. Please contact support.',
+      };
+    }
+
+    // 2. Send the OTP email.
+    const emailTemplate = this.getForgetPasswordEmailTemplate(appName);
+
+    const otpData = await this.postJson<SendOtpResponse>(
+      `${authUrl}/ChangePassword/Email`,
+      {
+        applicationId,
+        userName: resolvedUserName,
+        emailId: resolvedEmail,
+        emailTemplate,
+        emailSubject: `Forget Password OTP Verification - ${appName}`,
+      },
+      tenantId,
+    );
+
+    if (otpData.isSuccess) {
+      const maskedEmail = this.maskEmail(resolvedEmail);
+
+      return {
+        success: true,
+        token: otpData.encryptedToken,
+        maskedEmail,
+        userName: resolvedUserName,
+        emailId: resolvedEmail,
+        message: `OTP has been sent to your registered EmailId - ${maskedEmail}`,
+      };
+    }
+
+    if (otpData.errorMessage?.toLowerCase() === 'otp_already_sent') {
+      return {
+        success: false,
+        message:
+          "Sorry, OTP already sent, password reset doesn't work now. Please try again after 2 minutes.",
+      };
+    }
+
+    return {
+      success: false,
+      message:
+        otpData.errorMessage ||
+        'Sorry, something went wrong. Please try again after sometime.',
+    };
+  }
+
+  private maskEmail(email: string): string {
+    const parts = email.split('@');
+
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      return '***';
+    }
+
+    const local = parts[0];
+
+    if (local.length > 2) {
+      return `${local[0]}${'*'.repeat(local.length - 2)}${local[local.length - 1]}@${parts[1]}`;
+    }
+
+    return `${local[0]}*@${parts[1]}`;
+  }
+
+  private getForgetPasswordEmailTemplate(appName: string): string {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${appName}</title>
+</head>
+<body>
+  <p>Dear User,</p>
+  <p><strong>[OTP]</strong> is your OTP for Forget Password.
+  For security reasons, do not share your OTP with anyone.</p>
+  <p style="font-size:14px;color:#424242;font-family:Arial,sans-serif;margin-bottom:16px;">
+    Use the following one-time password (OTP) to continue with your
+    ${appName} account password reset.
+  </p>
+  <p><i>This is a system-generated email. Please do not respond.</i></p>
+  <p>Regards,<br>Team ${appName}</p>
+</body>
+</html>`;
   }
 }

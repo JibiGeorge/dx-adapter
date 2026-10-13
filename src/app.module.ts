@@ -10,6 +10,7 @@ import { SecurityHeadersMiddleware } from '../common/middleware/security-headers
 import { LoggingModule } from '../common/logging/logging.module.js';
 import { RequestContextMiddleware } from '../common/logging/request-context.middleware.js';
 import { HttpLoggingInterceptor } from '../common/logging/http-logging.interceptor.js';
+import { HttpModule } from '../common/http/http.module.js';
 import { HttpExceptionFilter } from '../common/filters/http-exception.filter.js';
 import { CacheModule } from '@nestjs/cache-manager';
 import { AppCacheModule } from './cache/cache.module';
@@ -30,6 +31,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
       max: 1000, // maximum number of cached entries
     }),
     LoggingModule,
+    HttpModule,
     TenantModule,
     AppCacheModule,
     AuthModule,
