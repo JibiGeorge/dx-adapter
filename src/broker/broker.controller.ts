@@ -8,7 +8,7 @@ import { DashboardResponse } from './broker.types.js';
 @Controller('broker')
 @UseGuards(JwtAuthGuard)
 export class BrokerController {
-  constructor(private readonly brokerService: BrokerService) {}
+  constructor(private readonly brokerService: BrokerService) { }
 
   @Get('index')
   async getBrokerData(
@@ -20,5 +20,17 @@ export class BrokerController {
     }
 
     return this.brokerService.getBrokerData(tenantId, user);
+  }
+
+  @Get('policy-list')
+  async getPolicyList(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+  ): Promise <any> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+
+    return this.brokerService.getPolicyList(tenantId, user);
   }
 }

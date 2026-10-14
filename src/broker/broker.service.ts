@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { UserSessionPayload } from '../auth/auth.types.js';
 import { DashboardResponse } from './broker.types.js';
 import { TenantConfigTypes } from '../tenant/tenant.types.js';
@@ -12,6 +12,8 @@ import {
   LAWTON_TENANT_ID,
   LAWTON_TPA_IDS,
 } from './broker.constants.js';
+import { parseDotNetDate } from '../../utils/date-helper.js';
+import { mapAgentPolicies, mapFallbackPolicies } from '../../utils/policy.mapper.js';
 
 @Injectable()
 export class BrokerService {
@@ -19,7 +21,7 @@ export class BrokerService {
     private readonly tenantService: TenantService,
     private readonly claimApiService: ClaimApiService,
     private readonly logger: LoggingService,
-  ) {}
+  ) { }
 
   async getBrokerData(tenantId: string, user: UserSessionPayload): Promise<DashboardResponse> {
     const trimmedTenantId = tenantId.trim();
@@ -190,5 +192,197 @@ export class BrokerService {
     }
 
     return Array.from(resolvedIds);
+  }
+
+  async getPolicyList(
+    tenantId: string,
+    user: UserSessionPayload,
+  ) {
+    const normalizedTenantId = tenantId.trim();
+    const brokerId = user.brokerId || DEFAULT_BROKER_ID;
+    const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+    const startedAt = Date.now();
+
+    const context = {
+      tenantId: normalizedTenantId,
+      brokerId,
+      userId: user.userId,
+    };
+
+    this.logger.log(
+      'Fetching broker policy list',
+      BrokerService.name,
+      context,
+    );
+
+    try {
+      const tenantConfig: TenantConfigTypes =
+        await this.tenantService.getFullTenantById(
+          normalizedTenantId,
+        );
+
+      const claimApis = tenantConfig.config?.claimApis;
+      const claimApiUrl = claimApis?.v1?.replace(/\/+$/, '');
+
+      if (!claimApiUrl) {
+        throw new InternalServerErrorException(
+          'Claim API URL is not configured for this tenant.',
+        );
+      }
+
+      // First attempt: agent-level policy search.
+      const allowedTPAIds = isLawton ? LAWTON_TPA_IDS : [];
+
+      const agentSearchStartedAt = Date.now();
+
+      const agentResponse =
+        await this.claimApiService.searchPoliciesByAgent(
+          brokerId,
+          allowedTPAIds,
+          claimApiUrl,
+        );
+
+      const agentPolicies =
+        agentResponse?.policyHeaders ??
+        agentResponse?.PolicyHeaders ??
+        [];
+
+      if (!Array.isArray(agentPolicies)) {
+        throw new InternalServerErrorException(
+          'Invalid response received from agent policy search.',
+        );
+      }
+
+      this.logger.log(
+        'Agent policy search completed',
+        BrokerService.name,
+        {
+          ...context,
+          policyCount: agentPolicies.length,
+          durationMs: Date.now() - agentSearchStartedAt,
+        },
+      );
+
+      if (agentPolicies.length > 0) {
+        const policies = mapAgentPolicies(agentPolicies);
+
+        this.logger.log(
+          'Broker policy list retrieved using agent search',
+          BrokerService.name,
+          {
+            ...context,
+            source: 'agent',
+            policyCount: policies.length,
+            durationMs: Date.now() - startedAt,
+          },
+        );
+
+        return { success: true, policies };
+      }
+
+      // Second attempt: corporate-level fallback search.
+      this.logger.log(
+        'Agent policy search returned no policies; using corporate fallback',
+        BrokerService.name,
+        context,
+      );
+
+      const corpIds = await this.resolveFallbackCorpIds(
+        normalizedTenantId,
+        user,
+        tenantConfig,
+        isLawton,
+      );
+
+      const fallbackStartedAt = Date.now();
+
+      const fallbackResponse =
+        await this.claimApiService.searchPolicies(
+          corpIds,
+          claimApis?.v2 || '',
+          claimApis?.v2Key || '',
+          normalizedTenantId,
+          false,
+        );
+
+      const fallbackItems =
+        fallbackResponse?.policyDetails ??
+        fallbackResponse?.PolicyDetails ??
+        [];
+
+      if (!Array.isArray(fallbackItems)) {
+        throw new InternalServerErrorException(
+          'Invalid response received from corporate policy search.',
+        );
+      }
+
+      // Preserve the existing fallback expiry rule.
+      const today = new Date();
+
+      const activePolicies = fallbackItems.filter((policy) => {
+        const rawEndDate =
+          policy.polEndDate ??
+          policy.PolEndDate ??
+          policy.endDate ??
+          policy.EndDate;
+
+        if (!rawEndDate) {
+          return true;
+        }
+
+        const expiryDate = parseDotNetDate(rawEndDate);
+
+        return (
+          expiryDate instanceof Date &&
+          !Number.isNaN(expiryDate.getTime()) &&
+          expiryDate >= today
+        );
+      });
+
+      const policies = mapFallbackPolicies(activePolicies);
+
+      this.logger.log(
+        'Corporate fallback policy search completed',
+        BrokerService.name,
+        {
+          ...context,
+          corporateCount: corpIds.length,
+          receivedCount: fallbackItems.length,
+          activeCount: activePolicies.length,
+          policyCount: policies.length,
+          durationMs: Date.now() - fallbackStartedAt,
+        },
+      );
+
+      this.logger.log(
+        'Broker policy list retrieved',
+        BrokerService.name,
+        {
+          ...context,
+          source: 'corporate-fallback',
+          policyCount: policies.length,
+          durationMs: Date.now() - startedAt,
+        },
+      );
+
+      return { success: true, policies };
+    } catch (error) {
+      const err =
+        error instanceof Error
+          ? error
+          : new Error(String(error));
+
+      this.logger.error(
+        `Failed to fetch broker policy list: ${err.message}`,
+        err.stack,
+        BrokerService.name,
+        {
+          ...context,
+          durationMs: Date.now() - startedAt,
+        },
+      );
+
+      throw error;
+    }
   }
 }
