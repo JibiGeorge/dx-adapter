@@ -1,0 +1,18 @@
+export const LAWTON_TENANT_ID = 'MzAyNHxMYXd0b25Bc2lhIzIwMjZATWF5';
+export const DEFAULT_BROKER_ID = '120';
+export const DEFAULT_FALLBACK_CORP_ID = 1041805;
+
+export const LAWTON_TPA_IDS = [120, 93];
+
+export const LAWTON_FALLBACK_CORP_IDS: number[] = [
+  1422143,
+  1422123,
+  1422130,
+  1422104,
+  1422138,
+  1422145,
+  1422136,
+  1422147,
+  1422146,
+  1422144,
+];

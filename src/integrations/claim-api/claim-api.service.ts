@@ -1,56 +1,80 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { HttpService } from '../../../common/http/http.service';
+import { Injectable } from '@nestjs/common';
+import { HttpService } from '../../../common/http/http.service.js';
+import { LoggingService } from '../../../common/logging/logging.service.js';
+import { AgentPolicySearchResponse, GroupCorpPolicyResponse } from './claim-api.types.js';
 
 @Injectable()
 export class ClaimApiService {
-    private readonly logger = new Logger(ClaimApiService.name);
+  constructor(
+    private readonly httpService: HttpService,
+    private readonly logger: LoggingService,
+  ) {}
 
-    constructor(
-        private readonly httpService: HttpService,
-    ) { }
+  async searchPoliciesByAgent(
+    brokerId: string | number,
+    allowedTPAIds: number[],
+    baseUrl: string,
+  ): Promise<AgentPolicySearchResponse> {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/policy/search/agentcode`;
 
-    async searchPoliciesByAgent(
-        brokerId: string | number,
-        allowedTPAIds: number[],
-        baseUrl: string,
-    ) {
-        this.logger.debug(`Searching policies for broker: ${brokerId}`);
+    this.logger.debug(
+      `Searching policies by agent for brokerId: ${brokerId}`,
+      ClaimApiService.name,
+      { brokerId, allowedTPAIds, endpoint },
+    );
 
-        const response: any = await this.httpService.post(`${baseUrl}/policy/search/agentcode`, {
-            BrokerId: brokerId,
-            MandateBrokerName: null,
-            AllowedTPAIds: allowedTPAIds
-        })
+    const payload = {
+      BrokerId: brokerId,
+      MandateBrokerName: null,
+      AllowedTPAIds: allowedTPAIds,
+    };
 
-        if (!response.isSuccess) {
-            throw new Error(`Failed to fetch policies for broker: ${brokerId}`);
-        }
+    const response = await this.httpService.post<AgentPolicySearchResponse>(endpoint, payload);
 
-        return response;
+    if (!response?.isSuccess) {
+      this.logger.warn(
+        `Agent policy search failed for brokerId: ${brokerId}`,
+        ClaimApiService.name,
+        { brokerId, response },
+      );
+      throw new Error(`Failed to fetch policies for broker: ${brokerId}`);
     }
 
-    async searchPoliciesByGroupCorp(groupCorpId: number, tenantId: string, baseUrl: string, accessKey: string, ShowallClaims: boolean) {
-        const payload = {
-            GroupCorporateIds: [groupCorpId],
-            Range: 100,
-            StartIndex: 0
-        }
+    return response;
+  }
 
-        const response: any = await fetch(`${baseUrl}/api/v2/PolicySearch/.json`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CA-SHARED-KEY': accessKey,
-                'Payer': tenantId,
-                'LoadArchive': ShowallClaims ? 'True' : 'False',
-            },
-            body: JSON.stringify(payload),
-        })
+  async searchPoliciesByGroupCorp(
+    groupCorpId: number,
+    tenantId: string,
+    baseUrl: string,
+    accessKey: string,
+    showAllClaims: boolean,
+  ): Promise<GroupCorpPolicyResponse> {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/api/v2/PolicySearch/.json`;
 
-        if (!response.ok) {
-            throw new Error(`Failed to fetch policies for group corp: ${groupCorpId}`);
-        }
+    this.logger.debug(
+      `Searching policies by group corp: ${groupCorpId}`,
+      ClaimApiService.name,
+      { groupCorpId, tenantId, endpoint },
+    );
 
-        return response.json();
-    }
+    const payload = {
+      GroupCorporateIds: [groupCorpId],
+      Range: 100,
+      StartIndex: 0,
+    };
+
+    const response = await this.httpService.post<GroupCorpPolicyResponse>(endpoint, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CA-SHARED-KEY': accessKey,
+        'Payer': tenantId,
+        'LoadArchive': showAllClaims ? 'True' : 'False',
+      },
+    });
+
+    return response;
+  }
 }
