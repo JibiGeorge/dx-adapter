@@ -16,6 +16,7 @@ import { CacheModule } from '@nestjs/cache-manager';
 import { AppCacheModule } from './cache/cache.module';
 import { AuthModule } from './auth/auth.module';
 import { TenantIdGuard } from '../common/guards/tenant-id.guard';
+import { BrokerModule } from './broker/broker.module';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -35,6 +36,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     TenantModule,
     AppCacheModule,
     AuthModule,
+    BrokerModule,
   ],
   controllers: [AppController],
   providers: [

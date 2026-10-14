@@ -102,6 +102,16 @@ export class TenantRepository {
           orgCode: doc.config?.auraHealth?.orgCode ?? '',
           webhookLink: doc.config?.auraHealth?.webhookLink ?? '',
         },
+
+        additionalConfigs: {
+          allowedTPAIds: doc.config?.additionalConfigs?.allowedTPAIds ?? '',
+          brokerDashboards: Array.isArray(doc.config?.additionalConfigs?.brokerDashboards)
+            ? doc.config.additionalConfigs.brokerDashboards
+            : [],
+          hrDashboards: Array.isArray(doc.config?.additionalConfigs?.hrDashboards)
+            ? doc.config.additionalConfigs.hrDashboards
+            : [],
+        },
       },
     };
   }

@@ -86,6 +86,7 @@ export interface TenantInternalConfig {
   email: TenantEmailConfig;
   sms: TenantSmsConfig;
   auraHealth: TenantAuraHealthConfig;
+  additionalConfigs: TenantAdditionalConfigs;
 }
 
 /**
@@ -123,4 +124,19 @@ export interface TenantPublicResponse {
   domains: string[];
   version: number;
   config: TenantPublicConfig;
+}
+
+export interface TenantAdditionalConfigs {
+  allowedTPAIds: string;
+  brokerDashboards: TenantDashboardOption[];
+  hrDashboards: TenantDashboardOption[];
+}
+
+export interface TenantDashboardOption {
+  key: string;
+  label: string;
+  includeDepartmentFilter: boolean;
+  filterTable: string;
+  filterColumn: string;
+  filterOn: string;
 }
