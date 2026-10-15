@@ -1,4 +1,4 @@
-import { All, BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { All, BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { BrokerRoleGuard } from '../../common/guards/broker-role.guard.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
@@ -13,8 +13,11 @@ import {
   CountryResponse,
   DashboardResponse,
   SaveBankDetailsResponse,
+  UploadClaimDocumentResponse,
 } from './broker.types.js';
+import type { UploadedMulterFile } from './broker.types.js';
 import { GetFormFieldDto } from './dto/form-field.dto.js';
+import { FileInterceptor } from '@nestjs/platform-express';
 
 @Controller('broker')
 @UseGuards(JwtAuthGuard, BrokerRoleGuard)
@@ -133,5 +136,23 @@ export class BrokerController {
     }
 
     return this.brokerService.saveBankDetails(tenantId, user, dto);
+  }
+
+  @Post('upload-claim-document')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadClaimDocument(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @UploadedFile() file?: UploadedMulterFile,
+  ): Promise<UploadClaimDocumentResponse> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+
+    if (!file) {
+      throw new BadRequestException('No file uploaded');
+    }
+
+    return this.brokerService.uploadClaimDocument(tenantId, user, file);
   }
 }

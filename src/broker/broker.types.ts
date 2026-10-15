@@ -102,4 +102,27 @@ export interface SaveBankDetailsResponse {
   error?: string;
 }
 
+export interface UploadClaimDocumentResponse {
+  isSuccess: boolean;
+  fileGUID?: string;
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  error?: string;
+}
+
+export interface UploadedMulterFile {
+  fieldname: string;
+  originalname: string;
+  encoding: string;
+  mimetype: string;
+  size: number;
+  destination?: string;
+  filename?: string;
+  path?: string;
+  buffer: Buffer;
+}
+
+
+
 

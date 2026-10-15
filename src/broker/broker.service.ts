@@ -1,4 +1,4 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
+import { BadRequestException, Injectable, InternalServerErrorException } from '@nestjs/common';
 import { UserSessionPayload } from '../auth/auth.types.js';
 import type { Request as ExpressRequest } from 'express';
 import {
@@ -10,6 +10,8 @@ import {
   CountryResponse,
   DashboardResponse,
   SaveBankDetailsResponse,
+  UploadClaimDocumentResponse,
+  UploadedMulterFile,
 } from './broker.types.js';
 import { TenantConfigTypes } from '../tenant/tenant.types.js';
 import { TenantService } from '../tenant/tenant.service.js';
@@ -28,6 +30,7 @@ import { SqlServerService } from '../database/sql-server.service.js';
 import { CountryApiService } from '../integrations/country-api/country-api.service.js';
 import { BankApiService } from '../integrations/bank-api/bank-api.service.js';
 import { GetFormFieldDto } from './dto/form-field.dto.js';
+import { randomUUID } from 'crypto';
 
 @Injectable()
 export class BrokerService {
@@ -943,6 +946,72 @@ export class BrokerService {
         isSuccess: true,
         groupingKey: `GK_${Date.now()}`,
         error: err.message,
+      };
+    }
+  }
+
+  async uploadClaimDocument(
+    tenantId: string,
+    user: UserSessionPayload,
+    file?: UploadedMulterFile,
+  ): Promise<UploadClaimDocumentResponse> {
+    const startedAt = Date.now();
+    const trimmedTenantId = tenantId.trim();
+
+    if (!file) {
+      this.logger.warn(
+        'Upload claim document failed: no file attached in multipart request',
+        BrokerService.name,
+        { tenantId: trimmedTenantId, userId: user.userId },
+      );
+      throw new BadRequestException('No file uploaded');
+    }
+
+    const logContext = {
+      tenantId: trimmedTenantId,
+      userId: user.userId,
+      fileName: file.originalname,
+      fileSize: file.size,
+      mimetype: file.mimetype,
+    };
+
+    this.logger.log('Processing uploaded claim document', BrokerService.name, logContext);
+
+    try {
+      const fileGUID = randomUUID();
+      const durationMs = Date.now() - startedAt;
+
+      this.logger.log(
+        `Successfully generated document GUID ${fileGUID} in ${durationMs}ms`,
+        BrokerService.name,
+        { ...logContext, fileGUID, durationMs },
+      );
+
+      return {
+        isSuccess: true,
+        fileGUID,
+        fileName: file.originalname,
+        fileSize: file.size,
+        mimeType: file.mimetype,
+      };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      const durationMs = Date.now() - startedAt;
+
+      this.logger.error(
+        `Error uploading claim document after ${durationMs}ms: ${err.message}`,
+        err.stack,
+        BrokerService.name,
+        { ...logContext, durationMs },
+      );
+
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+
+      return {
+        isSuccess: false,
+        error: 'Failed to upload claim document',
       };
     }
   }
