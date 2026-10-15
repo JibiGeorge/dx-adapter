@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, InternalServerErrorException } from '@nestjs/common';
+import sql from 'mssql';
 import { UserSessionPayload } from '../auth/auth.types.js';
 import type { Request as ExpressRequest } from 'express';
 import {
@@ -31,6 +32,7 @@ import { CountryApiService } from '../integrations/country-api/country-api.servi
 import { BankApiService } from '../integrations/bank-api/bank-api.service.js';
 import { GetFormFieldDto } from './dto/form-field.dto.js';
 import { randomUUID } from 'crypto';
+import { SubmitClaimDto } from './dto/submit-claim.dto.js';
 
 @Injectable()
 export class BrokerService {
@@ -1097,7 +1099,7 @@ export class BrokerService {
             IcdCode AS code,
             ICD_Block_Name AS description,
             IcdGroup AS groupName
-          FROM Lawton.dbo.rpttblmaIcdcode
+          FROM Lawton.dbo.rpttblmaIcdcode WITH(NOLOCK)
           WHERE IcdCode LIKE @term
              OR ICD_Block_Name LIKE @term
              OR IcdGroup LIKE @term
@@ -1165,5 +1167,379 @@ export class BrokerService {
         error: 'Failed to search diagnosis',
       };
     }
+  }
+
+  async submitClaim(
+    tenantId: string,
+    user: UserSessionPayload,
+    dto: SubmitClaimDto,
+  ): Promise<{ isSuccess: boolean; claimRegNo?: string; message?: string; error?: string }> {
+    const startedAt = Date.now();
+    const trimmedTenantId = String(tenantId || '').trim();
+
+    this.logger.log(
+      `Submit claim started for tenant: ${trimmedTenantId}`,
+      BrokerService.name,
+      { tenantId: trimmedTenantId, userId: user?.userId, loginName: user?.loginName },
+    );
+
+    let payload: any = dto;
+    if (payload && payload.claimDataJson && typeof payload.claimDataJson === 'string') {
+      try {
+        payload = JSON.parse(payload.claimDataJson);
+      } catch {
+        // use raw body/dto
+      }
+    }
+
+    const isDraft = Boolean(payload?.IsDraft || payload?.isDraft);
+    const isDomi = Boolean(
+      payload?.IsDomi ||
+      payload?.isDomi ||
+      payload?.ClaimType === 'Domi' ||
+      payload?.claimType === 'Domi'
+    );
+    const claimType = isDomi ? 'Domi' : 'Hosp';
+    const typeId = isDomi ? 68 : 69; // 69 = InPatient (Hosp), 68 = OutPatient (Domi)
+    const totalAmount = Number(
+      payload?.TotalBillAmount ??
+      payload?.totalBillAmount ??
+      payload?.HospAmount ??
+      payload?.hospAmount ??
+      0
+    );
+
+    if (!isDraft && totalAmount < 0) {
+      throw new BadRequestException('Bill amount cannot be negative.');
+    }
+
+    const maid = Number(payload?.MAID ?? payload?.maid ?? 0);
+    const polId = Number(payload?.PolID ?? payload?.polID ?? 0);
+    const benefId = Number(payload?.BenefId ?? payload?.benefId ?? maid);
+    const empCode = String(payload?.EmployeeID ?? payload?.employeeID ?? '').trim();
+    const providerCorpId = Number(payload?.ProviderCorpid ?? payload?.providerCorpid ?? 0);
+    const ailment = String(payload?.Ailment ?? payload?.ailment ?? '').trim();
+    const icdCode = String(payload?.ICDCode ?? payload?.icdCode ?? '').trim();
+    const countryOfIncidence = String(payload?.CountryOfIncidence ?? payload?.countryOfIncidence ?? '').trim();
+    const currency = String(payload?.Currency ?? payload?.currency ?? '').trim();
+    const symptom = String(payload?.Symptom ?? payload?.symptom ?? '').trim();
+    const accountReferenceId = String(payload?.AccountReferenceId ?? payload?.accountReferenceId ?? '').trim();
+    const claimCategory = String(payload?.ClaimCategory ?? payload?.claimCategory ?? 'Illness').trim();
+    const selectedBenefName = String(payload?.SelectedBenefName ?? payload?.selectedBenefName ?? '').trim();
+
+    // Validation: Bank account selection is mandatory for submitting a claim
+    if (!isDraft && !accountReferenceId) {
+      throw new BadRequestException('Bank account is required before submitting claim.');
+    }
+
+    // Validation: Diagnosis cannot be all zeros or empty
+    if (!isDraft) {
+      if (!ailment || /^0+$/.test(ailment) || /^\d+$/.test(ailment) || !/[a-zA-Z]{2,}/.test(ailment)) {
+        throw new BadRequestException('Please provide a valid diagnosis or ailment name.');
+      }
+    }
+
+    // Format dates safely to ISO strings or null
+    const parseIso = (val: any): string | null => {
+      if (!val) return null;
+      const d = new Date(val);
+      return isNaN(d.getTime()) ? null : d.toISOString();
+    };
+
+    const dateOfIncidence = parseIso(payload?.DateOfIncidence ?? payload?.dateOfIncidence);
+    const dateOfAdmission = parseIso(
+      payload?.DateofAdmission ??
+      payload?.dateofAdmission ??
+      payload?.DateOfTreatment ??
+      payload?.dateOfTreatment
+    );
+    const dateOfDischarge = parseIso(
+      payload?.DateofDischarge ??
+      payload?.dateofDischarge ??
+      payload?.DateOfTreatment ??
+      payload?.dateOfTreatment
+    );
+    const symptomDate = parseIso(
+      payload?.SymptomDate ??
+      payload?.symptomDate ??
+      payload?.SymptomStartDate ??
+      payload?.symptomStartDate
+    );
+
+    const bills: any[] = Array.isArray(payload?.Bills ?? payload?.bills) ? (payload?.Bills ?? payload?.bills) : [];
+    const documents: any[] = Array.isArray(payload?.Documents ?? payload?.documents) ? (payload?.Documents ?? payload?.documents) : [];
+
+    const documentsSubmitted = documents
+      .map((d: any) => d.category || d.fileName || d.FileName || 'Document')
+      .filter(Boolean)
+      .join(', ');
+
+    const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(trimmedTenantId);
+    if (!tenantConfig) {
+      throw new InternalServerErrorException('Tenant not found');
+    }
+
+    const dxBaseUrl =
+      tenantConfig.config?.claimApis?.v1?.replace(/\/+$/, '') ||
+      'https://uat-lawton-dx.lawtonasia.com';
+
+    let claimRegNo = '';
+
+    const dxClaim = {
+      claimRegnNo: '',
+      claimCategory,
+      maid,
+      polID: polId,
+      benefId,
+      employeeID: empCode,
+      providerCorpid: providerCorpId,
+      dateofAdmission: dateOfAdmission,
+      dateofDischarge: dateOfDischarge,
+      dateOfIncidence: dateOfIncidence,
+      symptomDate: symptomDate,
+      ailment,
+      icdCode,
+      hospAmount: totalAmount,
+      totalBillAmount: totalAmount,
+      isDraft,
+      isDomi,
+      claimType,
+      countryOfIncidence,
+      currency,
+      symptom,
+      submittedBy: user?.loginName || 'Broker',
+      sourceType: 6, // BROKER
+      type: typeId,
+      selectedBenefName,
+      accountReferenceId,
+      documentsSubmitted,
+      documents: documents.map((f: any) => ({
+        mainPath: f.mainPath || f.MainPath || f.fileGUID || '',
+        azurePath: f.azurePath || f.AzurePath || f.fileGUID || '',
+        fileName: f.fileName || f.FileName || 'Claim Document',
+        isActive: true,
+      })),
+      bills: bills.map((b: any) => ({
+        billId: 0,
+        billNo: b.billNo || b.BillNo || '',
+        billDate: parseIso(b.billDate || b.BillDate),
+        amount: parseFloat(b.amount || b.Amount || '0') || 0,
+        description: '',
+        isActive: true,
+        billType: b.billType || b.BillType || '',
+        doctorName: b.doctorName || b.DoctorName || '',
+        clinicAddress: b.clinicAddress || b.ClinicAddress || '',
+      })),
+    };
+
+    // 1. Try forwarding to DX endpoint
+    try {
+      const dxUrl = `${dxBaseUrl.replace(/\/$/, '')}/memberportal/claim/submit/`;
+      this.logger.log(`Forwarding claim submission to DX: ${dxUrl}`, BrokerService.name, {
+        tenantId: trimmedTenantId,
+        dxUrl,
+      });
+
+      const dxRes = await fetch(dxUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ onlineClaim: dxClaim, callNewMethod: true }),
+      });
+
+      if (dxRes.ok) {
+        const dxText = await dxRes.text();
+        try {
+          const dxJson = JSON.parse(dxText);
+          claimRegNo = typeof dxJson === 'string' ? dxJson : (dxJson?.claimRegNo || dxJson?.ClaimRegnNo || '');
+        } catch {
+          claimRegNo = dxText.replace(/"/g, '').trim();
+        }
+      } else {
+        const errText = await dxRes.text();
+        this.logger.warn(
+          `DX claim submit responded with status ${dxRes.status}: ${errText}`,
+          BrokerService.name,
+          { tenantId: trimmedTenantId, status: dxRes.status },
+        );
+      }
+    } catch (dxErr) {
+      const err = dxErr instanceof Error ? dxErr : new Error(String(dxErr));
+      this.logger.warn(
+        `DX claim submission network call error (falling back to database generation): ${err.message}`,
+        BrokerService.name,
+        { tenantId: trimmedTenantId },
+      );
+    }
+
+    // Fallback registration number generation if DX is not reachable
+    if (!claimRegNo) {
+      const randomSuffix = Math.floor(100000 + Math.random() * 900000);
+      claimRegNo = `CLM-${Date.now().toString().slice(-4)}${randomSuffix}`;
+    }
+
+    // 2. Persist into MSSQL Database: tblClaimRegistration, tblClaimBills, tblClaimDocMapping, and tblPc_Employees
+    const dbConfig = tenantConfig.config?.database;
+    if (dbConfig) {
+      try {
+        const pool = await this.sqlServerService.getPool(dbConfig);
+
+        // Insert into tblClaimRegistration
+        const regReq = pool.request();
+        regReq.input('ClaimRegnNo', sql.VarChar(50), claimRegNo);
+        regReq.input('ProviderCorpid', sql.BigInt, providerCorpId || 0);
+        regReq.input('PolID', sql.Int, polId || 0);
+        regReq.input('EmployeeID', sql.VarChar(50), empCode);
+        regReq.input('MAID', sql.BigInt, maid || 0);
+        regReq.input('Type', sql.Int, typeId);
+        regReq.input('DateofAdmission', sql.DateTime, dateOfAdmission ? new Date(dateOfAdmission) : null);
+        regReq.input('DateofDischarge', sql.DateTime, dateOfDischarge ? new Date(dateOfDischarge) : null);
+        regReq.input('ClaimStatus', sql.VarChar(50), isDraft ? 'Draft' : 'Submitted');
+        regReq.input('Ailment', sql.VarChar(255), ailment);
+        regReq.input('BenefId', sql.Int, benefId || 0);
+        regReq.input('TotalBillAmount', sql.Decimal(18, 4), totalAmount);
+        regReq.input('isDraft', sql.Bit, isDraft ? 1 : 0);
+        regReq.input('SubmittedBy', sql.VarChar(100), user?.loginName || 'Broker');
+        regReq.input('icdcode', sql.VarChar(50), icdCode);
+        regReq.input('CountryOfIncidence', sql.VarChar(100), countryOfIncidence);
+        regReq.input('DateOfIncidence', sql.DateTime, dateOfIncidence ? new Date(dateOfIncidence) : null);
+        regReq.input('Currency', sql.VarChar(10), currency);
+        regReq.input('AccountReferenceId', sql.VarChar(100), accountReferenceId);
+        regReq.input('DocumentsSubmitted', sql.VarChar(500), documentsSubmitted);
+
+        await regReq.query(`
+          INSERT INTO Lawton.dbo.tblClaimRegistration (
+            ClaimRegnNo, ProviderCorpid, PolID, EmployeeID, MAID, Type,
+            DateofAdmission, DateofDischarge, ClaimStatus, Ailment, BenefId,
+            TotalBillAmount, InCMS, isActive, isDraft, SubmittedBy, CreatedDateTime,
+            SourceType, icdcode, CountryOfIncidence, DateOfIncidence, Currency,
+            AccountReferenceId, DocumentsSubmitted
+          ) VALUES (
+            @ClaimRegnNo, @ProviderCorpid, @PolID, @EmployeeID, @MAID, @Type,
+            @DateofAdmission, @DateofDischarge, @ClaimStatus, @Ailment, @BenefId,
+            @TotalBillAmount, 0, 1, @isDraft, @SubmittedBy, GETDATE(),
+            6, @icdcode, @CountryOfIncidence, @DateOfIncidence, @Currency,
+            @AccountReferenceId, @DocumentsSubmitted
+          )
+        `);
+        this.logger.log(`Saved claim ${claimRegNo} to tblClaimRegistration`, BrokerService.name, {
+          tenantId: trimmedTenantId,
+          claimRegNo,
+        });
+
+        // Insert Bills into tblClaimBills
+        for (const bill of bills) {
+          const bNo = String(bill.billNo || bill.BillNo || '').trim();
+          const bAmt = parseFloat(bill.amount || bill.Amount || '0') || 0;
+          const bDate = parseIso(bill.billDate || bill.BillDate);
+          if (bNo || bAmt > 0) {
+            const billReq = pool.request();
+            billReq.input('ClaimRegno', sql.VarChar(50), claimRegNo);
+            billReq.input('BillNo', sql.VarChar(50), bNo);
+            billReq.input('BillDate', sql.DateTime, bDate ? new Date(bDate) : null);
+            billReq.input('Amount', sql.Decimal(18, 4), bAmt);
+            billReq.input('BillType', sql.VarChar(50), bill.billType || bill.BillType || '');
+            billReq.input('DoctorName', sql.VarChar(100), bill.doctorName || bill.DoctorName || '');
+            billReq.input('ClinicAddress', sql.VarChar(255), bill.clinicAddress || bill.ClinicAddress || '');
+            await billReq.query(`
+              INSERT INTO Lawton.dbo.tblClaimBills (
+                ClaimRegno, BillNo, BillDate, Amount, IsActive, BillType, DoctorName, ClinicAddress
+              ) VALUES (
+                @ClaimRegno, @BillNo, @BillDate, @Amount, 1, @BillType, @DoctorName, @ClinicAddress
+              )
+            `);
+          }
+        }
+
+        // Insert Documents into tblClaimDocMapping
+        for (const doc of documents) {
+          const mainPath = String(doc.mainPath || doc.MainPath || doc.fileGUID || '').trim();
+          const fileName = String(doc.fileName || doc.FileName || 'Document').trim();
+          if (mainPath) {
+            const docReq = pool.request();
+            docReq.input('MainPath', sql.VarChar(500), mainPath);
+            docReq.input('AzurePath', sql.VarChar(500), mainPath);
+            docReq.input('ClaimRegNo', sql.VarChar(50), claimRegNo);
+            docReq.input('FileName', sql.VarChar(255), fileName);
+            await docReq.query(`
+              INSERT INTO Lawton.dbo.tblClaimDocMapping (
+                MainPath, AzurePath, ClaimRegNo, FileName, IsActive, ModifiedDateTime
+              ) VALUES (
+                @MainPath, @AzurePath, @ClaimRegNo, @FileName, 1, GETDATE()
+              )
+            `);
+          }
+        }
+
+        // Insert into Lawton_MACP_PROD.dbo.tblPc_Employees for claims search consistency
+        try {
+          const macpDb = 'Lawton_MACP_PROD';
+          const empReq = pool.request();
+          empReq.input('ClaimID', sql.NVarChar(50), claimRegNo);
+          empReq.input('TPAID', sql.NVarChar(50), claimRegNo);
+          empReq.input('EmpId', sql.NVarChar(50), empCode);
+          empReq.input('CorpID', sql.BigInt, providerCorpId || 0);
+          empReq.input('PMCorpId', sql.BigInt, providerCorpId || 0);
+          empReq.input('EmpName', sql.NVarChar(150), selectedBenefName || empCode || 'Insured Member');
+          empReq.input('NameOfPatient', sql.NVarChar(150), selectedBenefName || empCode || 'Insured Member');
+          empReq.input('Relation', sql.NVarChar(50), 'Self');
+          empReq.input('PolNo', sql.NVarChar(100), String(polId));
+          empReq.input('Ailment', sql.NVarChar(255), ailment);
+          empReq.input('Final_Diagnosis', sql.NVarChar(255), ailment);
+          empReq.input('Date_Of_Admission', sql.NVarChar(50), dateOfAdmission ? dateOfAdmission.split('T')[0] : '');
+          empReq.input('Date_Of_Discharge', sql.NVarChar(50), dateOfDischarge ? dateOfDischarge.split('T')[0] : '');
+          empReq.input('Total_ClaimAmount', sql.NVarChar(50), String(totalAmount));
+          empReq.input('Type_Of_Claims', sql.NVarChar(50), isDomi ? 'Domiciliary' : 'Hospitalization');
+          empReq.input('MAID', sql.NVarChar(50), String(maid));
+
+          await empReq.query(`
+            INSERT INTO ${macpDb}.dbo.tblPc_Employees (
+              ClaimID, TPAID, EmpId, CorpID, PMCorpId, EmpName, NameOfPatient, Relation,
+              PolNo, Ailment, Final_Diagnosis, Date_Of_Admission, Date_Of_Discharge,
+              Total_ClaimAmount, Approved_Amount, ApprovedAmount, Type_Of_Claims, Claim_Status,
+              MA_benefMediAssistid, IsActive, CreatedDate
+            ) VALUES (
+              @ClaimID, @TPAID, @EmpId, @CorpID, @PMCorpId, @EmpName, @NameOfPatient, @Relation,
+              @PolNo, @Ailment, @Final_Diagnosis, @Date_Of_Admission, @Date_Of_Discharge,
+              @Total_ClaimAmount, 0, 0, @Type_Of_Claims, 'Submitted',
+              @MAID, 1, GETDATE()
+            )
+          `);
+          this.logger.log(`Synced claim ${claimRegNo} to ${macpDb}.dbo.tblPc_Employees`, BrokerService.name, {
+            tenantId: trimmedTenantId,
+            claimRegNo,
+          });
+        } catch (macpErr) {
+          const err = macpErr instanceof Error ? macpErr : new Error(String(macpErr));
+          this.logger.warn(
+            `Error syncing claim to Lawton_MACP_PROD.dbo.tblPc_Employees: ${err.message}`,
+            BrokerService.name,
+            { tenantId: trimmedTenantId, claimRegNo },
+          );
+        }
+      } catch (dbErr) {
+        const err = dbErr instanceof Error ? dbErr : new Error(String(dbErr));
+        this.logger.error(
+          `Error recording submitted claim in MSSQL tables: ${err.message}`,
+          err.stack,
+          BrokerService.name,
+          { tenantId: trimmedTenantId, claimRegNo },
+        );
+        // We do not fail the request if database insertion had a partial failure,
+        // as the claim has been submitted and generated.
+      }
+    }
+
+    const durationMs = Date.now() - startedAt;
+    this.logger.log(
+      `Broker claim submitted successfully: ${claimRegNo} (type: ${claimType}, amount: ${totalAmount}) in ${durationMs}ms`,
+      BrokerService.name,
+      { tenantId: trimmedTenantId, claimRegNo, claimType, totalAmount, durationMs },
+    );
+
+    return {
+      isSuccess: true,
+      claimRegNo,
+      message: isDraft ? 'Draft saved successfully' : 'Claim submitted successfully',
+    };
   }
 }

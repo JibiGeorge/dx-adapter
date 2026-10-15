@@ -18,6 +18,7 @@ import {
 import type { UploadedMulterFile } from './broker.types.js';
 import { GetFormFieldDto } from './dto/form-field.dto.js';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { SubmitClaimDto } from './dto/submit-claim.dto.js';
 
 @Controller('broker')
 @UseGuards(JwtAuthGuard, BrokerRoleGuard)
@@ -167,5 +168,18 @@ export class BrokerController {
     }
 
     return this.brokerService.searchDiagnosis(tenantId, user, term);
+  }
+
+  @Post('submit-claim')
+  async submitClaim(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Body() dto: SubmitClaimDto,
+  ): Promise<any> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+
+    return this.brokerService.submitClaim(tenantId, user, dto);
   }
 }
