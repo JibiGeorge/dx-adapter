@@ -46,3 +46,83 @@ export interface BrokerDashboardOption {
   filterColumn: string;
   filterOn: string;
 }
+
+export interface ClaimDateResponse {
+  isSuccess: boolean;
+  error?: string;
+  benbeneficiaries?: Beneficiaries[];
+  empCode?: string;
+  providerCorpId?: number;
+  polId?: number
+}
+
+export interface Beneficiaries {
+  MAID: string | number;
+  BenefUserId: string | number;
+  Name: string;
+  Relation: string;
+  Gender: string;
+  DOB: string;
+  PIHMemberId: string;
+}
+
+export interface CountryMasterItem {
+  countryId: number;
+  countryName: string;
+  countryCode?: string;
+  currencyName?: string;
+  currencyCode?: string;
+  countryContactCode?: string;
+  regionid?: number;
+  isActive?: number;
+  createdDate?: string;
+  createdBy?: number;
+  countryCode2Digit?: string;
+  [key: string]: unknown;
+}
+
+export interface CountryResponse {
+  countryMasters: CountryMasterItem[];
+}
+
+export interface BankAccountItem {
+  data: Record<string, string>;
+  groupingKey?: string;
+}
+
+export interface BankAccountsResponse {
+  isSuccess: boolean;
+  accounts: BankAccountItem[];
+  error?: string;
+}
+
+export interface SaveBankDetailsResponse {
+  isSuccess: boolean;
+  groupingKey: string;
+  error?: string;
+}
+
+export interface UploadClaimDocumentResponse {
+  isSuccess: boolean;
+  fileGUID?: string;
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  error?: string;
+}
+
+export interface UploadedMulterFile {
+  fieldname: string;
+  originalname: string;
+  encoding: string;
+  mimetype: string;
+  size: number;
+  destination?: string;
+  filename?: string;
+  path?: string;
+  buffer: Buffer;
+}
+
+
+
+

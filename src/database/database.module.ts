@@ -3,6 +3,8 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TenantRepository } from './repositories/tenant.repository.js';
 
+import { SqlServerService } from './sql-server.service.js';
+
 @Module({
   imports: [
     MongooseModule.forRootAsync({
@@ -21,7 +23,7 @@ import { TenantRepository } from './repositories/tenant.repository.js';
       inject: [ConfigService],
     }),
   ],
-  providers: [TenantRepository],
-  exports: [TenantRepository],
+  providers: [TenantRepository, SqlServerService],
+  exports: [TenantRepository, SqlServerService],
 })
 export class DatabaseModule {}
