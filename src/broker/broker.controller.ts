@@ -3,7 +3,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import type { UserSessionPayload } from '../auth/auth.types.js';
 import { BrokerService } from './broker.service.js';
-import { Beneficiaries, ClaimDateResponse, DashboardResponse } from './broker.types.js';
+import { ClaimDateResponse, CountryResponse, DashboardResponse } from './broker.types.js';
 
 @Controller('broker')
 @UseGuards(JwtAuthGuard)
@@ -50,5 +50,17 @@ export class BrokerController {
     }
 
     return this.brokerService.getMemberClaimData(tenantId, user, maid, polId, empCode, corpId, pihNumber, name);
+  }
+
+  @Get('countries')
+  async getCountries(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+  ): Promise<CountryResponse> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+
+    return this.brokerService.getCountries(tenantId, user);
   }
 }

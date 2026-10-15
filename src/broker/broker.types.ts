@@ -65,3 +65,22 @@ export interface Beneficiaries {
   DOB: string;
   PIHMemberId: string;
 }
+
+export interface CountryMasterItem {
+  countryId: number;
+  countryName: string;
+  countryCode?: string;
+  currencyName?: string;
+  currencyCode?: string;
+  countryContactCode?: string;
+  regionid?: number;
+  isActive?: number;
+  createdDate?: string;
+  createdBy?: number;
+  countryCode2Digit?: string;
+  [key: string]: unknown;
+}
+
+export interface CountryResponse {
+  countryMasters: CountryMasterItem[];
+}

@@ -1,6 +1,6 @@
 import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { UserSessionPayload } from '../auth/auth.types.js';
-import { Beneficiaries, ClaimDateResponse, DashboardResponse } from './broker.types.js';
+import { Beneficiaries, ClaimDateResponse, CountryMasterItem, CountryResponse, DashboardResponse } from './broker.types.js';
 import { TenantConfigTypes } from '../tenant/tenant.types.js';
 import { TenantService } from '../tenant/tenant.service.js';
 import { ClaimApiService } from '../integrations/claim-api/claim-api.service.js';
@@ -15,6 +15,7 @@ import {
 import { parseDotNetDate } from '../../utils/date-helper.js';
 import { mapAgentPolicies, mapFallbackPolicies } from '../../utils/policy.mapper.js';
 import { SqlServerService } from '../database/sql-server.service.js';
+import { CountryApiService } from '../integrations/country-api/country-api.service.js';
 
 @Injectable()
 export class BrokerService {
@@ -23,6 +24,7 @@ export class BrokerService {
     private readonly claimApiService: ClaimApiService,
     private readonly logger: LoggingService,
     private readonly sqlServerService: SqlServerService,
+    private readonly countryApiService: CountryApiService,
   ) { }
 
   async getBrokerData(tenantId: string, user: UserSessionPayload): Promise<DashboardResponse> {
@@ -594,5 +596,64 @@ export class BrokerService {
       DOB: resolvedDob,
       PIHMemberId: resolvedPih,
     };
+  }
+
+  async getCountries(tenantId: string, user: UserSessionPayload): Promise<CountryResponse> {
+    const startedAt = Date.now();
+    const trimmedTenantId = tenantId.trim();
+    const logContext = { tenantId: trimmedTenantId, userId: user.userId };
+
+    this.logger.log('Fetching countries list for tenant', BrokerService.name, logContext);
+
+    try {
+      const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(trimmedTenantId);
+      const claimV3Api = tenantConfig.config.claimApis?.v3?.replace(/\/+$/, '');
+      const claimV3PairKey = tenantConfig.config.claimApis?.pairKey?.replace(/\/+$/, '');
+
+      if (!claimV3Api || !claimV3PairKey) {
+        this.logger.error(
+          `Country API URL (claimApis.v3 or pairKey) is not configured for tenant: ${trimmedTenantId}`,
+          undefined,
+          BrokerService.name,
+          logContext,
+        );
+        throw new InternalServerErrorException('Country API is not configured for this tenant');
+      }
+
+      const response = await this.countryApiService.getCountries(claimV3Api, claimV3PairKey, trimmedTenantId);
+      const countryMasters: CountryMasterItem[] =
+        response?.countryMasters ||
+        response?.CountryMasters ||
+        response?.countryList ||
+        response?.CountryList ||
+        [];
+      const durationMs = Date.now() - startedAt;
+
+      this.logger.log(
+        `Successfully fetched ${countryMasters.length} countries in ${durationMs}ms`,
+        BrokerService.name,
+        { ...logContext, count: countryMasters.length, durationMs },
+      );
+
+      return {
+        countryMasters,
+      };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      const durationMs = Date.now() - startedAt;
+
+      this.logger.error(
+        `Failed to fetch countries after ${durationMs}ms: ${err.message}`,
+        err.stack,
+        BrokerService.name,
+        { ...logContext, durationMs },
+      );
+
+      if (error instanceof InternalServerErrorException) {
+        throw error;
+      }
+
+      throw new InternalServerErrorException(err.message || 'Failed to fetch countries');
+    }
   }
 }
