@@ -93,4 +93,28 @@ export class BankApiService {
             ? response
             : response?.fields || response?.data || response?.response || [];
     }
+
+    async saveBankDetails(
+        baseUrl: string,
+        baseApiKey: string,
+        tenantId: string,
+        payload: any,
+    ): Promise<any> {
+        const cleanUrl = baseUrl.replace(/\/+$/, '');
+        const endpoint = `${cleanUrl}/Api/v3/AddUpdateAccountDetails`;
+
+        this.logger.debug('Calling external AddUpdateAccountDetails API', BankApiService.name, {
+            endpoint,
+        });
+
+        const response = await this.httpService.post<any>(endpoint, payload, {
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CA-SHARED-KEY': baseApiKey,
+                'Payer': tenantId,
+            },
+        });
+
+        return response;
+    }
 }

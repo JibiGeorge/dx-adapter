@@ -12,6 +12,7 @@ import {
   ClaimDateResponse,
   CountryResponse,
   DashboardResponse,
+  SaveBankDetailsResponse,
 } from './broker.types.js';
 import { GetFormFieldDto } from './dto/form-field.dto.js';
 
@@ -119,5 +120,18 @@ export class BrokerController {
     }
 
     return this.brokerService.getBankformField(tenantId, user, dto);
+  }
+
+  @Post('save-bank-details')
+  async saveBankDetails(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Body() dto: any,
+  ): Promise<SaveBankDetailsResponse> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+
+    return this.brokerService.saveBankDetails(tenantId, user, dto);
   }
 }

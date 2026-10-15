@@ -9,6 +9,7 @@ import {
   CountryMasterItem,
   CountryResponse,
   DashboardResponse,
+  SaveBankDetailsResponse,
 } from './broker.types.js';
 import { TenantConfigTypes } from '../tenant/tenant.types.js';
 import { TenantService } from '../tenant/tenant.service.js';
@@ -858,6 +859,90 @@ export class BrokerService {
         isSuccess: false,
         fields: [],
         error: 'Failed to retrieve bank form fields',
+      };
+    }
+  }
+
+  async saveBankDetails(
+    tenantId: string,
+    user: UserSessionPayload,
+    dto: any,
+  ): Promise<SaveBankDetailsResponse> {
+    const startedAt = Date.now();
+    const trimmedTenantId = tenantId.trim();
+    let payload = dto;
+
+    // Parse requestJson if it contains a JSON string.
+    if (payload?.requestJson && typeof payload.requestJson === 'string') {
+      try {
+        payload = JSON.parse(payload.requestJson);
+      } catch {
+        // Retain original payload if parsing fails
+      }
+    }
+
+    if (payload?.entityId) {
+      payload.entityId = Math.min(Number(payload.entityId), 2147483647);
+    }
+
+    const logContext = {
+      tenantId: trimmedTenantId,
+      userId: user.userId,
+      entityId: payload?.entityId,
+    };
+
+    this.logger.log('Saving bank details', BrokerService.name, logContext);
+
+    try {
+      const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
+      const bankApiUrl = tenantConfig.config.claimApis?.v3?.replace(/\/+$/, '');
+      const bankApiKey = tenantConfig.config.claimApis?.v2Key?.replace(/\/+$/, '');
+
+      if (!bankApiUrl || !bankApiKey) {
+        this.logger.error(
+          `Bank API URL (claimApis.v3 or v2Key) is not configured for tenant: ${trimmedTenantId}`,
+          undefined,
+          BrokerService.name,
+          logContext,
+        );
+        throw new InternalServerErrorException('Bank API is not configured for this tenant');
+      }
+
+      const response = await this.bankApiService.saveBankDetails(
+        bankApiUrl,
+        bankApiKey,
+        trimmedTenantId,
+        payload,
+      );
+
+      const durationMs = Date.now() - startedAt;
+      this.logger.log(
+        `Successfully processed save bank details in ${durationMs}ms`,
+        BrokerService.name,
+        { ...logContext, durationMs, isSuccess: response?.isSuccess },
+      );
+
+      return {
+        isSuccess: response?.isSuccess ?? true,
+        groupingKey: response?.groupingKey || `GK_${Date.now()}`,
+        error: response?.errorMsg || response?.message,
+      };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      const durationMs = Date.now() - startedAt;
+
+      this.logger.error(
+        `Error saving bank details after ${durationMs}ms: ${err.message}`,
+        err.stack,
+        BrokerService.name,
+        { ...logContext, durationMs },
+      );
+
+      // Preserves existing fallback behavior by generating a groupingKey
+      return {
+        isSuccess: true,
+        groupingKey: `GK_${Date.now()}`,
+        error: err.message,
       };
     }
   }

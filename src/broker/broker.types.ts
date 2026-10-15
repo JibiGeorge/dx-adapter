@@ -96,3 +96,10 @@ export interface BankAccountsResponse {
   error?: string;
 }
 
+export interface SaveBankDetailsResponse {
+  isSuccess: boolean;
+  groupingKey: string;
+  error?: string;
+}
+
+
