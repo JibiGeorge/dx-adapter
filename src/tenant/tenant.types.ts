@@ -77,6 +77,7 @@ export interface TenantAuraHealthConfig {
  * Never return this object directly from a public controller.
  */
 export interface TenantInternalConfig {
+  corpId: string | number;
   app: TenantAppConfig;
   auth: TenantAuthConfig;
   services: TenantServicesConfig;
@@ -130,6 +131,9 @@ export interface TenantAdditionalConfigs {
   allowedTPAIds: string;
   brokerDashboards: TenantDashboardOption[];
   hrDashboards: TenantDashboardOption[];
+  dataexchange: {
+    api: string;
+  }
 }
 
 export interface TenantDashboardOption {

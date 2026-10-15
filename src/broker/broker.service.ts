@@ -167,53 +167,12 @@ export class BrokerService {
     tenantConfig: TenantConfigTypes,
     isLawton: boolean,
   ): Promise<number[]> {
-    if (isLawton || String(user.brokerId) === DEFAULT_BROKER_ID) {
-      this.logger.debug(
-        `Using Lawton / default broker fallback corporate IDs`,
-        BrokerService.name,
-        { tenantId, brokerId: user.brokerId },
-      );
-      return [...LAWTON_FALLBACK_CORP_IDS];
-    }
-
-    const groupCorpId = Number(user.providerGroupCorpId || 0);
-    const resolvedIds = new Set<number>();
-
-    if (groupCorpId > 0 && tenantConfig.config.claimApis.v2) {
-      try {
-        const groupCorpResponse = await this.claimApiService.searchPoliciesByGroupCorp(
-          groupCorpId,
-          tenantId,
-          tenantConfig.config.claimApis.v2,
-          tenantConfig.config.claimApis.v2Key || '',
-          false,
-        );
-
-        const policies = groupCorpResponse?.policyDetails || [];
-        for (const policy of policies) {
-          const cid = Number(policy.pol_CorporateId ?? policy.CorporateId ?? policy.corporateId ?? 0);
-          if (cid > 0) {
-            resolvedIds.add(cid);
-          }
-        }
-      } catch (err) {
-        this.logger.warn(
-          `Failed searching policies by group corp: ${(err as Error).message}`,
-          BrokerService.name,
-          { groupCorpId, tenantId },
-        );
-      }
-
-      if (resolvedIds.size === 0) {
-        resolvedIds.add(groupCorpId);
-      }
-    }
-
-    if (resolvedIds.size === 0) {
-      resolvedIds.add(DEFAULT_FALLBACK_CORP_ID);
-    }
-
-    return Array.from(resolvedIds);
+    return this.claimApiService.resolveFallbackCorpIds(
+      tenantId,
+      user,
+      tenantConfig,
+      isLawton,
+    );
   }
 
   async getPolicyList(

@@ -17,6 +17,7 @@ import { AppCacheModule } from './cache/cache.module';
 import { AuthModule } from './auth/auth.module';
 import { TenantIdGuard } from '../common/guards/tenant-id.guard';
 import { BrokerModule } from './broker/broker.module';
+import { HRModule } from './hr/hr.module';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -37,6 +38,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     AppCacheModule,
     AuthModule,
     BrokerModule,
+    HRModule,
   ],
   controllers: [AppController],
   providers: [

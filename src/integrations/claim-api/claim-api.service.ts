@@ -128,4 +128,72 @@ export class ClaimApiService {
 
     return response;
   }
+
+  /**
+   * Resolves fallback corporate IDs when agent policy headers are empty or default.
+   * Shared across Broker and HR modules.
+   */
+  async resolveFallbackCorpIds(
+    tenantId: string,
+    user: { brokerId?: string | number; providerGroupCorpId?: string | number },
+    tenantConfig: { config?: { claimApis?: { v2?: string; v2Key?: string } } },
+    isLawton: boolean,
+  ): Promise<number[]> {
+    const LAWTON_FALLBACK_CORP_IDS = [
+      1422143, 1422123, 1422130, 1422104, 1422138, 1422145, 1422136, 1422147, 1422146, 1422144,
+    ];
+    const DEFAULT_BROKER_ID = '120';
+    const DEFAULT_FALLBACK_CORP_ID = 1041805;
+
+    if (isLawton || String(user.brokerId) === DEFAULT_BROKER_ID) {
+      this.logger.debug(
+        `Using Lawton / default fallback corporate IDs`,
+        ClaimApiService.name,
+        { tenantId, brokerId: user.brokerId },
+      );
+      return [...LAWTON_FALLBACK_CORP_IDS];
+    }
+
+    const groupCorpId = Number(user.providerGroupCorpId || 0);
+    const resolvedIds = new Set<number>();
+
+    const v2Url = tenantConfig.config?.claimApis?.v2;
+    const v2Key = tenantConfig.config?.claimApis?.v2Key || '';
+
+    if (groupCorpId > 0 && v2Url) {
+      try {
+        const groupCorpResponse = await this.searchPoliciesByGroupCorp(
+          groupCorpId,
+          tenantId,
+          v2Url,
+          v2Key,
+          false,
+        );
+
+        const policies = groupCorpResponse?.policyDetails || [];
+        for (const policy of policies) {
+          const cid = Number(policy.pol_CorporateId ?? policy.CorporateId ?? policy.corporateId ?? 0);
+          if (cid > 0) {
+            resolvedIds.add(cid);
+          }
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Failed searching policies by group corp: ${(err as Error).message}`,
+          ClaimApiService.name,
+          { groupCorpId, tenantId },
+        );
+      }
+
+      if (resolvedIds.size === 0) {
+        resolvedIds.add(groupCorpId);
+      }
+    }
+
+    if (resolvedIds.size === 0) {
+      resolvedIds.add(DEFAULT_FALLBACK_CORP_ID);
+    }
+
+    return Array.from(resolvedIds);
+  }
 }
