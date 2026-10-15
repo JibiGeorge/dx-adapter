@@ -1,9 +1,17 @@
-import { BadRequestException, Controller, Get, Headers, Query, UseGuards } from '@nestjs/common';
+import { All, BadRequestException, Controller, Get, Headers, Param, Query, Req, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import type { UserSessionPayload } from '../auth/auth.types.js';
 import { BrokerService } from './broker.service.js';
-import { ClaimDateResponse, CountryResponse, DashboardResponse } from './broker.types.js';
+import type { Request as ExpressRequest } from 'express';
+import {
+  BankAccountItem,
+  BankAccountsResponse,
+  Beneficiaries,
+  ClaimDateResponse,
+  CountryResponse,
+  DashboardResponse,
+} from './broker.types.js';
 
 @Controller('broker')
 @UseGuards(JwtAuthGuard)
@@ -79,7 +87,22 @@ export class BrokerController {
     ];
 
     return {
-      isSuccess: true, categories
+      isSuccess: true,
+      categories,
+    };
+  }
+
+  @All(['bank-accounts', 'bank-accounts/:entityId'])
+  async getBankAccounts(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Req() req: ExpressRequest,
+    @Param('entityId') paramEntityId?: string,
+  ): Promise<BankAccountsResponse> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
     }
+
+    return this.brokerService.getBankAccounts(tenantId, user, req, paramEntityId);
   }
 }

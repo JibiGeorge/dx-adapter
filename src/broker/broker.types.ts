@@ -84,3 +84,15 @@ export interface CountryMasterItem {
 export interface CountryResponse {
   countryMasters: CountryMasterItem[];
 }
+
+export interface BankAccountItem {
+  data: Record<string, string>;
+  groupingKey?: string;
+}
+
+export interface BankAccountsResponse {
+  isSuccess: boolean;
+  accounts: BankAccountItem[];
+  error?: string;
+}
+

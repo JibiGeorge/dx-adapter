@@ -6,9 +6,10 @@ import { ClaimApiModule } from "../integrations/claim-api/claim-api.module";
 import { TenantModule } from "../tenant/tenant.module";
 import { DatabaseModule } from "../database/database.module";
 import { CountryApiModule } from "../integrations/country-api/country-api.module";
+import { BankApiModule } from "../integrations/bank-api/bank-api.module";
 
 @Module({
-    imports: [AuthModule, ClaimApiModule, CountryApiModule, TenantModule, DatabaseModule],
+    imports: [AuthModule, ClaimApiModule, CountryApiModule, BankApiModule, TenantModule, DatabaseModule],
     controllers: [BrokerController],
     providers: [BrokerService],
     exports: [BrokerService],

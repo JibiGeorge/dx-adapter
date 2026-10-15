@@ -1,6 +1,15 @@
 import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { UserSessionPayload } from '../auth/auth.types.js';
-import { Beneficiaries, ClaimDateResponse, CountryMasterItem, CountryResponse, DashboardResponse } from './broker.types.js';
+import type { Request as ExpressRequest } from 'express';
+import {
+  BankAccountItem,
+  BankAccountsResponse,
+  Beneficiaries,
+  ClaimDateResponse,
+  CountryMasterItem,
+  CountryResponse,
+  DashboardResponse,
+} from './broker.types.js';
 import { TenantConfigTypes } from '../tenant/tenant.types.js';
 import { TenantService } from '../tenant/tenant.service.js';
 import { ClaimApiService } from '../integrations/claim-api/claim-api.service.js';
@@ -16,6 +25,7 @@ import { parseDotNetDate } from '../../utils/date-helper.js';
 import { mapAgentPolicies, mapFallbackPolicies } from '../../utils/policy.mapper.js';
 import { SqlServerService } from '../database/sql-server.service.js';
 import { CountryApiService } from '../integrations/country-api/country-api.service.js';
+import { BankApiService } from '../integrations/bank-api/bank-api.service.js';
 
 @Injectable()
 export class BrokerService {
@@ -25,6 +35,7 @@ export class BrokerService {
     private readonly logger: LoggingService,
     private readonly sqlServerService: SqlServerService,
     private readonly countryApiService: CountryApiService,
+    private readonly bankApiService: BankApiService
   ) { }
 
   async getBrokerData(tenantId: string, user: UserSessionPayload): Promise<DashboardResponse> {
@@ -654,6 +665,163 @@ export class BrokerService {
       }
 
       throw new InternalServerErrorException(err.message || 'Failed to fetch countries');
+    }
+  }
+
+  async getBankAccounts(
+    tenantId: string,
+    user: UserSessionPayload,
+    req: ExpressRequest,
+    paramEntityId?: string,
+  ): Promise<BankAccountsResponse> {
+    const startedAt = Date.now();
+    const trimmedTenantId = tenantId.trim();
+    const rawId =
+      paramEntityId ||
+      req.params?.['entityId'] ||
+      (req.body as any)?.entityId ||
+      (req.body as any)?.entaityId ||
+      (req.query as any)?.entityId ||
+      0;
+    const entityId = Number(rawId);
+
+    const logContext = {
+      tenantId: trimmedTenantId,
+      userId: user.userId,
+      entityId,
+      rawId,
+    };
+
+    if (!entityId || entityId <= 0) {
+      this.logger.debug(
+        'Empty or invalid entityId provided for bank accounts lookup; returning empty list',
+        BrokerService.name,
+        logContext,
+      );
+      return {
+        isSuccess: true,
+        accounts: [],
+      };
+    }
+
+    this.logger.log('Fetching bank accounts for entity', BrokerService.name, logContext);
+
+    try {
+      const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
+      const bankApiUrl = tenantConfig.config.claimApis?.v3?.replace(/\/+$/, '');
+      const bankApiKey = tenantConfig.config.claimApis?.pairKey?.replace(/\/+$/, '');
+
+      if (!bankApiUrl || !bankApiKey) {
+        this.logger.error(
+          `Bank API URL (claimApis.v3 or pairKey) is not configured for tenant: ${trimmedTenantId}`,
+          undefined,
+          BrokerService.name,
+          logContext,
+        );
+        throw new InternalServerErrorException('Bank API is not configured for this tenant');
+      }
+
+      let response = await this.bankApiService.getBankAccounts(
+        bankApiUrl,
+        bankApiKey,
+        entityId,
+        trimmedTenantId,
+      );
+
+      // If no accounts found, the ID passed might be a MAID (e.g. 6000127656) or PIH suffix instead of BenefUserID
+      if (!response?.accountDetailsGroup?.length) {
+        const dbConfig = tenantConfig.config?.database;
+
+        if (dbConfig) {
+          const dbStart = Date.now();
+          try {
+            const pool = await this.sqlServerService.getPool(dbConfig);
+            const row = await pool
+              .request()
+              .input('id', entityId)
+              .query(
+                `SELECT TOP 1 BenefUserID
+                 FROM Lawton.dbo.tblmabeneficiary WITH(NOLOCK)
+                 WHERE BenefMediAssistID = @id OR BenefNIAPersonID = CAST(@id AS VARCHAR(50)) OR BenefNIAPersonID LIKE '%' + CAST(@id AS VARCHAR(50))`,
+              );
+
+            if (row.recordset?.length > 0 && Number(row.recordset[0].BenefUserID) !== entityId) {
+              const resolvedId = Number(row.recordset[0].BenefUserID);
+              this.logger.debug(
+                `Resolved BenefUserID fallback ${resolvedId} from DB in ${Date.now() - dbStart}ms; retrying bank API`,
+                BrokerService.name,
+                { ...logContext, resolvedId },
+              );
+
+              const retryResp = await this.bankApiService.getBankAccounts(
+                bankApiUrl,
+                bankApiKey,
+                resolvedId,
+                trimmedTenantId,
+              );
+
+              if (retryResp?.accountDetailsGroup?.length) {
+                response = retryResp;
+              }
+            }
+          } catch (dbErr) {
+            const err = dbErr instanceof Error ? dbErr : new Error(String(dbErr));
+            this.logger.warn(
+              `Failed resolving BenefUserID fallback from DB for bank accounts: ${err.message}`,
+              BrokerService.name,
+              logContext,
+            );
+          }
+        }
+      }
+
+      const accounts: BankAccountItem[] = [];
+
+      if (response?.isSuccess && Array.isArray(response.accountDetailsGroup)) {
+        for (const group of response.accountDetailsGroup) {
+          if (!Array.isArray(group.accountDetails)) continue;
+
+          const details: Record<string, string> = {};
+          for (const a of group.accountDetails) {
+            if (a.isActive !== false && a.key) {
+              details[a.key] = a.value ?? '';
+            }
+          }
+          accounts.push({ data: details, groupingKey: group.groupingKey });
+        }
+      }
+
+      const durationMs = Date.now() - startedAt;
+      this.logger.log(
+        `Successfully fetched ${accounts.length} bank accounts in ${durationMs}ms`,
+        BrokerService.name,
+        { ...logContext, count: accounts.length, durationMs },
+      );
+
+      return {
+        isSuccess: true,
+        accounts,
+      };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      const durationMs = Date.now() - startedAt;
+
+      this.logger.error(
+        `Failed fetching bank accounts after ${durationMs}ms: ${err.message}`,
+        err.stack,
+        BrokerService.name,
+        { ...logContext, durationMs },
+      );
+
+      if (error instanceof InternalServerErrorException) {
+        throw error;
+      }
+
+      return {
+        isSuccess: false,
+        accounts: [],
+        error: 'Failed to retrieve bank accounts',
+      };
     }
   }
 }
