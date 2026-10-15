@@ -11,9 +11,12 @@ export class AuthController {
     @Post('login')
     authLogin(
         @Headers('x-tenant-id') tenantId: string,
+        @Headers('x-role') roleHeader: string,
+        @Headers('role') altRoleHeader: string,
         @Body() body: AuthLoginDto,
     ) {
-        return this.authService.authLogin(tenantId, body.username, body.password);
+        const requestedRole = roleHeader || altRoleHeader;
+        return this.authService.authLogin(tenantId, body.username, body.password, requestedRole);
     }
 
     @Post('forget-password')

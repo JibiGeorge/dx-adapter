@@ -37,6 +37,7 @@ export class AuthService {
     tenantId: string,
     username: string,
     password: string,
+    requestedRole?: string,
   ): Promise<AuthResponse | AuthSessionResponse> {
     if (!tenantId?.trim()) {
       this.loggingService.warn('Login rejected: missing tenant identification');
@@ -48,7 +49,7 @@ export class AuthService {
     this.loggingService.log(
       `Login attempt for user: ${username}`,
       'AuthService',
-      { tenantId, username },
+      { tenantId, username, requestedRole },
     );
 
     const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(tenantId.trim());
@@ -279,6 +280,47 @@ export class AuthService {
           ),
         )
       );
+
+    // Validate role against requested role from header ('broker' or 'hr')
+    if (requestedRole?.trim()) {
+      const normalizedRole = requestedRole.trim().toLowerCase();
+
+      if (normalizedRole === 'broker' && !isBroker) {
+        this.loggingService.warn(
+          `User ${username} attempted to login as broker but lacks broker credentials/role`,
+          'AuthService',
+          { tenantId, username, requestedRole, isBroker, isCorpHR },
+        );
+        return {
+          userId,
+          authenticated: false,
+          isEmailVerified: baseProfile.IsEmailVerified ?? false,
+          isMobileVerified: baseProfile.IsMobileVerified ?? false,
+          isFirstLogin: false,
+          isSuccess: false,
+          errorMessage: 'Access denied: You do not have permissions for the Broker portal.',
+          errorDescription: 'User credentials do not match the Broker role.',
+        };
+      }
+
+      if (normalizedRole === 'hr' && !isCorpHR) {
+        this.loggingService.warn(
+          `User ${username} attempted to login as hr but lacks hr credentials/role`,
+          'AuthService',
+          { tenantId, username, requestedRole, isBroker, isCorpHR },
+        );
+        return {
+          userId,
+          authenticated: false,
+          isEmailVerified: baseProfile.IsEmailVerified ?? false,
+          isMobileVerified: baseProfile.IsMobileVerified ?? false,
+          isFirstLogin: false,
+          isSuccess: false,
+          errorMessage: 'Access denied: You do not have permissions for the HR portal.',
+          errorDescription: 'User credentials do not match the HR role.',
+        };
+      }
+    }
 
     // Step 7: Resolve profile image.
     const profileImages: Data[] =
