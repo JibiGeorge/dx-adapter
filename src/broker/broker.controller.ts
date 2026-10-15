@@ -63,4 +63,23 @@ export class BrokerController {
 
     return this.brokerService.getCountries(tenantId, user);
   }
+
+  @Get('claim-categories')
+  async getClaimCategories(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+  ): Promise<any> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+
+    const categories = [
+      { id: 'Illness', name: 'Illness' },
+      { id: 'Accident', name: 'Accident' },
+    ];
+
+    return {
+      isSuccess: true, categories
+    }
+  }
 }
