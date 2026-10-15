@@ -1,4 +1,4 @@
-import { All, BadRequestException, Controller, Get, Headers, Param, Query, Req, UseGuards } from '@nestjs/common';
+import { All, BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { BrokerRoleGuard } from '../../common/guards/broker-role.guard.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
@@ -13,6 +13,7 @@ import {
   CountryResponse,
   DashboardResponse,
 } from './broker.types.js';
+import { GetFormFieldDto } from './dto/form-field.dto.js';
 
 @Controller('broker')
 @UseGuards(JwtAuthGuard, BrokerRoleGuard)
@@ -105,5 +106,18 @@ export class BrokerController {
     }
 
     return this.brokerService.getBankAccounts(tenantId, user, req, paramEntityId);
+  }
+
+  @Post('bank-form-fields')
+  async getBankformField(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Body() dto: GetFormFieldDto
+  ): Promise<any> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException("x-tenant-id header is required");
+    }
+
+    return this.brokerService.getBankformField(tenantId, user, dto);
   }
 }

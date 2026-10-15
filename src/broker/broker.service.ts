@@ -26,6 +26,7 @@ import { mapAgentPolicies, mapFallbackPolicies } from '../../utils/policy.mapper
 import { SqlServerService } from '../database/sql-server.service.js';
 import { CountryApiService } from '../integrations/country-api/country-api.service.js';
 import { BankApiService } from '../integrations/bank-api/bank-api.service.js';
+import { GetFormFieldDto } from './dto/form-field.dto.js';
 
 @Injectable()
 export class BrokerService {
@@ -709,11 +710,11 @@ export class BrokerService {
     try {
       const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
       const bankApiUrl = tenantConfig.config.claimApis?.v3?.replace(/\/+$/, '');
-      const bankApiKey = tenantConfig.config.claimApis?.pairKey?.replace(/\/+$/, '');
+      const bankApiKey = tenantConfig.config.claimApis?.v2Key?.replace(/\/+$/, '');
 
       if (!bankApiUrl || !bankApiKey) {
         this.logger.error(
-          `Bank API URL (claimApis.v3 or pairKey) is not configured for tenant: ${trimmedTenantId}`,
+          `Bank API URL (claimApis.v3 or v2Key) is not configured for tenant: ${trimmedTenantId}`,
           undefined,
           BrokerService.name,
           logContext,
@@ -821,6 +822,42 @@ export class BrokerService {
         isSuccess: false,
         accounts: [],
         error: 'Failed to retrieve bank accounts',
+      };
+    }
+  }
+
+  async getBankformField(tenantId: string, user: UserSessionPayload, dto: GetFormFieldDto) {
+    const trimmedTenantId = tenantId.trim();
+    try {
+      const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
+      const bankApiUrl = tenantConfig.config.claimApis?.v3?.replace(/\/+$/, '');
+      const bankApiKey = tenantConfig.config.claimApis?.v2Key?.replace(/\/+$/, '');
+      if (!bankApiUrl || !bankApiKey) {
+        throw new InternalServerErrorException('Bank API is not configured for this tenant');
+      }
+
+      const fields = await this.bankApiService.getBankFormFields(bankApiUrl, bankApiKey, trimmedTenantId, dto.countryShortName || '', dto.country2DigitCode || '', dto.currency || '');
+      return {
+        isSuccess: true,
+        fields,
+      };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+
+      this.logger.error(
+        `Failed fetching bank form fields: ${err.message}`,
+        err.stack,
+        BrokerService.name,
+      );
+
+      if (error instanceof InternalServerErrorException) {
+        throw error;
+      }
+
+      return {
+        isSuccess: false,
+        fields: [],
+        error: 'Failed to retrieve bank form fields',
       };
     }
   }
