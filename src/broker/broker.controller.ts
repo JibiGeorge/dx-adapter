@@ -155,4 +155,17 @@ export class BrokerController {
 
     return this.brokerService.uploadClaimDocument(tenantId, user, file);
   }
+
+  @Get('search-diagnosis')
+  async searchDiagnosis(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Query('term') term?: string,
+  ): Promise<any> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+
+    return this.brokerService.searchDiagnosis(tenantId, user, term);
+  }
 }

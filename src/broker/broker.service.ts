@@ -1015,4 +1015,155 @@ export class BrokerService {
       };
     }
   }
+
+  async searchDiagnosis(
+    tenantId: string,
+    user: UserSessionPayload,
+    term?: string,
+  ) {
+    const startedAt = Date.now();
+    const trimmedTenantId = String(tenantId || '').trim();
+    const trimmedTerm = String(term || '').trim();
+
+    this.logger.log(
+      `Diagnosis search started`,
+      BrokerService.name,
+      {
+        tenantId: trimmedTenantId,
+        termLength: trimmedTerm.length,
+      },
+    );
+
+    if (trimmedTerm.length < 2) {
+      this.logger.log(
+        `Diagnosis search skipped: search term must contain at least 2 characters`,
+        BrokerService.name,
+        {
+          tenantId: trimmedTenantId,
+          termLength: trimmedTerm.length,
+          durationMs: Date.now() - startedAt,
+        },
+      );
+
+      return { isSuccess: true, codes: [] };
+    }
+
+    try {
+      const tenantConfig =
+        await this.tenantService.getFullTenantById(trimmedTenantId);
+
+      if (!tenantConfig) {
+        this.logger.error(
+          `Tenant configuration not found`,
+          undefined,
+          BrokerService.name,
+          {
+            tenantId: trimmedTenantId,
+            durationMs: Date.now() - startedAt,
+          },
+        );
+
+        throw new InternalServerErrorException('Tenant not found');
+      }
+
+      const dbConfig = tenantConfig.config?.database;
+
+      if (!dbConfig) {
+        this.logger.error(
+          `Database configuration missing for diagnosis search`,
+          undefined,
+          BrokerService.name,
+          {
+            tenantId: trimmedTenantId,
+            durationMs: Date.now() - startedAt,
+          },
+        );
+
+        return {
+          isSuccess: false,
+          codes: [],
+          error: 'Database configuration not found',
+        };
+      }
+
+      try {
+        const pool = await this.sqlServerService.getPool(dbConfig);
+
+        const row = await pool
+          .request()
+          .input('term', `%${trimmedTerm}%`)
+          .query(`
+          SELECT DISTINCT TOP 20
+            IcdCode AS code,
+            ICD_Block_Name AS description,
+            IcdGroup AS groupName
+          FROM Lawton.dbo.rpttblmaIcdcode
+          WHERE IcdCode LIKE @term
+             OR ICD_Block_Name LIKE @term
+             OR IcdGroup LIKE @term
+          ORDER BY description ASC
+        `);
+
+        const codes = (row.recordset || []).map((r: any) => ({
+          code: r.code || '',
+          description: r.description || r.groupName || r.code || '',
+          groupName: r.groupName || '',
+        }));
+
+        const durationMs = Date.now() - startedAt;
+
+        this.logger.log(
+          `Diagnosis search completed successfully`,
+          BrokerService.name,
+          {
+            tenantId: trimmedTenantId,
+            resultCount: codes.length,
+            durationMs,
+          },
+        );
+
+        return { isSuccess: true, codes };
+      } catch (error) {
+        const err =
+          error instanceof Error ? error : new Error(String(error));
+
+        this.logger.error(
+          `Database error during diagnosis search: ${err.message}`,
+          err.stack,
+          BrokerService.name,
+          {
+            tenantId: trimmedTenantId,
+            durationMs: Date.now() - startedAt,
+          },
+        );
+
+        return {
+          isSuccess: false,
+          codes: [],
+          error: 'Failed to search diagnosis',
+        };
+      }
+    } catch (error) {
+      const err =
+        error instanceof Error ? error : new Error(String(error));
+
+      const durationMs = Date.now() - startedAt;
+
+      this.logger.error(
+        `Diagnosis search failed after ${durationMs}ms: ${err.message}`,
+        err.stack,
+        BrokerService.name,
+        {
+          tenantId: trimmedTenantId,
+          durationMs,
+        },
+      );
+
+      return {
+        isSuccess: false,
+        codes: [],
+        error: 'Failed to search diagnosis',
+      };
+    }
+  }
 }
