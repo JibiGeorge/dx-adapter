@@ -1,5 +1,6 @@
 import { All, BadRequestException, Controller, Get, Headers, Param, Query, Req, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
+import { BrokerRoleGuard } from '../../common/guards/broker-role.guard.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import type { UserSessionPayload } from '../auth/auth.types.js';
 import { BrokerService } from './broker.service.js';
@@ -14,7 +15,7 @@ import {
 } from './broker.types.js';
 
 @Controller('broker')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, BrokerRoleGuard)
 export class BrokerController {
   constructor(private readonly brokerService: BrokerService) { }
 
