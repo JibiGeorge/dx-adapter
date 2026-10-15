@@ -112,9 +112,9 @@ export class TenantRepository {
           hrDashboards: Array.isArray(doc.config?.additionalConfigs?.hrDashboards)
             ? doc.config.additionalConfigs.hrDashboards
             : [],
-          dataexchange: {
-            api: doc.config?.additionalConfigs?.dataexchange?.api ?? '',
-          },
+        },
+        dataexchange: {
+          api: doc.config?.additionalConfigs?.dataexchange?.api ?? '',
         },
       },
     };

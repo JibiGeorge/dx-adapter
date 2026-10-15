@@ -88,6 +88,9 @@ export interface TenantInternalConfig {
   sms: TenantSmsConfig;
   auraHealth: TenantAuraHealthConfig;
   additionalConfigs: TenantAdditionalConfigs;
+  dataexchange: {
+    api: string;
+  }
 }
 
 /**
@@ -131,9 +134,6 @@ export interface TenantAdditionalConfigs {
   allowedTPAIds: string;
   brokerDashboards: TenantDashboardOption[];
   hrDashboards: TenantDashboardOption[];
-  dataexchange: {
-    api: string;
-  }
 }
 
 export interface TenantDashboardOption {
