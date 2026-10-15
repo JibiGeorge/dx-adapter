@@ -4,7 +4,7 @@ import { HRRoleGuard } from "../../common/guards/hr-role.guard.js";
 import { HRService } from "./hr.service.js";
 import { CurrentUser } from "../../common/decorators/current-user.decorator.js";
 import type { UserSessionPayload } from "../auth/auth.types.js";
-import { HRDashboardResponse } from "./hr.types.js";
+import { HRDashboardResponse, HRStatusResponse } from "./hr.types.js";
 
 @Controller('hr')
 @UseGuards(JwtAuthGuard, HRRoleGuard)
@@ -21,5 +21,20 @@ export class HRController {
         }
         
         return this.hrService.getHRData(tenantId, user);
+    }
+
+    @Get('stats')
+    async getHRStatus(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Headers('x-role') roleHeader?: string,
+        @Headers('role') altRoleHeader?: string,
+    ): Promise<HRStatusResponse> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const requestedRole = (roleHeader || altRoleHeader || 'hr').trim();
+        return this.hrService.getHRStatus(tenantId, user, requestedRole);
     }
 }

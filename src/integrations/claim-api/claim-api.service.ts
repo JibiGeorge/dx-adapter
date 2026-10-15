@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { HttpService } from '../../../common/http/http.service.js';
 import { LoggingService } from '../../../common/logging/logging.service.js';
 import { AgentPolicySearchResponse, GroupCorpPolicyResponse } from './claim-api.types.js';
+import { TenantConfigTypes } from '../../tenant/tenant.types.js';
 
 @Injectable()
 export class ClaimApiService {
@@ -195,5 +196,62 @@ export class ClaimApiService {
     }
 
     return Array.from(resolvedIds);
+  }
+
+  async searchClaims(
+    baseUrl: string,
+    tenantConfig: TenantConfigTypes,
+    corporateIds: number[],
+    role: string,
+  ) {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/api/v2/ClaimSearch/.json/`;
+
+    // Safely resolve DNSHostName by matching role, falling back to first domain or empty string
+    const matchedDomain =
+      tenantConfig.domains?.find(
+        (domain) => domain?.portal?.toLowerCase() === role?.toLowerCase(),
+      ) || tenantConfig.domains?.[0];
+    const dnsHostName = matchedDomain?.host || '';
+
+    const allowedTPAIds =
+      tenantConfig.config?.additionalConfigs?.allowedTPAIds || '';
+
+    const accessKey = tenantConfig.config?.claimApis?.v2Key || '';
+    const tenantId = tenantConfig.tenantId || '';
+
+    this.logger.debug('Searching claims', ClaimApiService.name, {
+      endpoint,
+      corporateIds,
+      dnsHostName,
+      role,
+    });
+
+    const payload = {
+      DNSHostName: dnsHostName,
+      AllowedTPAIds: allowedTPAIds,
+      CorporateIds: corporateIds,
+      Range: 100,
+      StartIndex: 0,
+    };
+
+    const response = await this.httpService.post<any>(endpoint, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...(accessKey ? { 'X-CA-SHARED-KEY': accessKey } : {}),
+        ...(tenantId ? { Payer: tenantId } : {}),
+      },
+    });
+
+    if (!response?.isSuccess) {
+      this.logger.warn('Claim search failed or returned unsuccessful', ClaimApiService.name, {
+        endpoint,
+        response,
+      });
+
+      return { isSuccess: false, claimSearchResults: [] };
+    }
+
+    return response;
   }
 }

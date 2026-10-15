@@ -93,6 +93,11 @@ export interface TenantInternalConfig {
   }
 }
 
+export interface TentantDomain {
+  host: string;
+  portal: string;
+}
+
 /**
  * Full tenant record returned by the configuration provider
  * and stored in the internal cache.
@@ -100,7 +105,7 @@ export interface TenantInternalConfig {
 export interface TenantConfigTypes {
   status: TenantStatus;
   tenantId: string;
-  domains: string[];
+  domains: TentantDomain[];
   version: number;
   config: TenantInternalConfig;
 }
@@ -125,7 +130,7 @@ export interface TenantPublicConfig {
 export interface TenantPublicResponse {
   status: TenantStatus;
   tenantId: string;
-  domains: string[];
+  domains: TentantDomain[];
   version: number;
   config: TenantPublicConfig;
 }

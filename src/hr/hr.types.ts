@@ -30,3 +30,25 @@ export interface HRReportsConfig {
   corpId: number | string;
   dashboards: any[];
 }
+
+export interface HRStatusResponse {
+  success: boolean;
+  stats: HRStats;
+}
+
+export interface HRStats {
+  corporateName: string;
+  totalEmployees: number;
+  activeEnrolledMembers: number;
+  pendingEnrollments: number;
+  totalClaimsRaised: number;
+  pendingClaimsApproval: number;
+  recentClaims: HRRecentClaim[];
+}
+
+export interface HRRecentClaim {
+  id: string | number;
+  employeeName: string;
+  claimAmount: number;
+  status: string;
+}
