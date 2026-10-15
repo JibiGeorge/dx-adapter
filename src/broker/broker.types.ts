@@ -46,3 +46,22 @@ export interface BrokerDashboardOption {
   filterColumn: string;
   filterOn: string;
 }
+
+export interface ClaimDateResponse {
+  isSuccess: boolean;
+  error?: string;
+  benbeneficiaries?: Beneficiaries[];
+  empCode?: string;
+  providerCorpId?: number;
+  polId?: number
+}
+
+export interface Beneficiaries {
+  MAID: string | number;
+  BenefUserId: string | number;
+  Name: string;
+  Relation: string;
+  Gender: string;
+  DOB: string;
+  PIHMemberId: string;
+}

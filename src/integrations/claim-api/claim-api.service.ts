@@ -99,4 +99,33 @@ export class ClaimApiService {
 
     return response;
   }
+
+  async getBeneficiaryFamily(maid: number, baseUrl: string) {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}api/v2/BeneficiaryFamily/`;
+
+    this.logger.debug(
+      `Fetching beneficiary family for MAID: ${maid}`,
+      ClaimApiService.name,
+      { maid, endpoint },
+    );
+
+    const payload = {
+      beneficiaryMediAssistId: maid,
+      dbType: 'MA'
+    };
+
+    const response = await this.httpService.post<any>(endpoint, payload);
+
+    if (!response?.isSuccess) {
+      this.logger.warn(
+        `Beneficiary family fetch failed for MAID: ${maid}`,
+        ClaimApiService.name,
+        { maid, response },
+      );
+      throw new Error(`Failed to fetch beneficiary family for MAID: ${maid}`);
+    }
+
+    return response;
+  }
 }

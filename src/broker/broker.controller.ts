@@ -1,9 +1,9 @@
-import { BadRequestException, Controller, Get, Headers, UseGuards } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Headers, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import type { UserSessionPayload } from '../auth/auth.types.js';
 import { BrokerService } from './broker.service.js';
-import { DashboardResponse } from './broker.types.js';
+import { Beneficiaries, ClaimDateResponse, DashboardResponse } from './broker.types.js';
 
 @Controller('broker')
 @UseGuards(JwtAuthGuard)
@@ -26,11 +26,29 @@ export class BrokerController {
   async getPolicyList(
     @Headers('x-tenant-id') tenantId: string,
     @CurrentUser() user: UserSessionPayload,
-  ): Promise <any> {
+  ): Promise<any> {
     if (!tenantId?.trim()) {
       throw new BadRequestException('x-tenant-id header is required');
     }
 
     return this.brokerService.getPolicyList(tenantId, user);
+  }
+
+  @Get('member-claim-data')
+  async getMemberClaimData(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Query('maid') maid?: string,
+    @Query('polId') polId?: string,
+    @Query('empCode') empCode?: string,
+    @Query('corpId') corpId?: string,
+    @Query('pihNumber') pihNumber?: string,
+    @Query('name') name?: string,
+  ): Promise<ClaimDateResponse> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+
+    return this.brokerService.getMemberClaimData(tenantId, user, maid, polId, empCode, corpId, pihNumber, name);
   }
 }

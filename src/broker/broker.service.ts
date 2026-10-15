@@ -1,6 +1,6 @@
 import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { UserSessionPayload } from '../auth/auth.types.js';
-import { DashboardResponse } from './broker.types.js';
+import { Beneficiaries, ClaimDateResponse, DashboardResponse } from './broker.types.js';
 import { TenantConfigTypes } from '../tenant/tenant.types.js';
 import { TenantService } from '../tenant/tenant.service.js';
 import { ClaimApiService } from '../integrations/claim-api/claim-api.service.js';
@@ -14,6 +14,7 @@ import {
 } from './broker.constants.js';
 import { parseDotNetDate } from '../../utils/date-helper.js';
 import { mapAgentPolicies, mapFallbackPolicies } from '../../utils/policy.mapper.js';
+import { SqlServerService } from '../database/sql-server.service.js';
 
 @Injectable()
 export class BrokerService {
@@ -21,6 +22,7 @@ export class BrokerService {
     private readonly tenantService: TenantService,
     private readonly claimApiService: ClaimApiService,
     private readonly logger: LoggingService,
+    private readonly sqlServerService: SqlServerService,
   ) { }
 
   async getBrokerData(tenantId: string, user: UserSessionPayload): Promise<DashboardResponse> {
@@ -384,5 +386,213 @@ export class BrokerService {
 
       throw error;
     }
+  }
+
+  async getMemberClaimData(
+    tenantId: string,
+    user: UserSessionPayload,
+    maid?: string,
+    polId?: string,
+    empCode?: string,
+    corpId?: string,
+    pihNumber?: string,
+    name?: string,
+  ): Promise<ClaimDateResponse> {
+    const startedAt = Date.now();
+    const trimmedTenantId = tenantId.trim();
+    const numMaid = Number(maid) || 0;
+    const parsedPolId = polId ? Number(polId) : undefined;
+    const parsedCorpId = corpId ? Number(corpId) : undefined;
+    const resolvedEmpCode = empCode?.trim() || '';
+    const logContext = {
+      tenantId: trimmedTenantId,
+      userId: user.userId,
+      maid: numMaid,
+      polId: parsedPolId,
+      corpId: parsedCorpId,
+      pihNumber,
+    };
+
+    this.logger.log('Fetching member claim data', BrokerService.name, logContext);
+
+    try {
+      const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(trimmedTenantId);
+      let beneficiaries: Beneficiaries[] = [];
+
+      // Step 1: Attempt to fetch beneficiary family from Claim API
+      if (numMaid > 0) {
+        beneficiaries = await this.fetchBeneficiaryFamilyFromApi(numMaid, tenantConfig, trimmedTenantId);
+      }
+
+      // Step 2: Fallback to SQL Server query if API returned no family members
+      if (beneficiaries.length === 0) {
+        this.logger.log(
+          'Beneficiaries empty after API fetch; falling back to primary beneficiary resolution',
+          BrokerService.name,
+          logContext,
+        );
+
+        const primaryBeneficiary = await this.resolvePrimaryBeneficiaryFallback(
+          numMaid,
+          pihNumber,
+          name,
+          tenantConfig,
+        );
+
+        beneficiaries = [primaryBeneficiary];
+      }
+
+      const durationMs = Date.now() - startedAt;
+      this.logger.log(
+        `Successfully retrieved member claim data in ${durationMs}ms`,
+        BrokerService.name,
+        {
+          ...logContext,
+          beneficiaryCount: beneficiaries.length,
+          durationMs,
+        },
+      );
+
+      return {
+        isSuccess: true,
+        benbeneficiaries: beneficiaries,
+        empCode: resolvedEmpCode,
+        providerCorpId: parsedCorpId,
+        polId: parsedPolId,
+      };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      const durationMs = Date.now() - startedAt;
+
+      this.logger.error(
+        `Error in member-claim-data after ${durationMs}ms: ${err.message}`,
+        err.stack,
+        BrokerService.name,
+        { ...logContext, durationMs },
+      );
+
+      return {
+        isSuccess: false,
+        error: 'Failed to retrieve member claim data',
+      };
+    }
+  }
+
+  /**
+   * Fetches beneficiary family records from external Claim API.
+   */
+  private async fetchBeneficiaryFamilyFromApi(
+    numMaid: number,
+    tenantConfig: TenantConfigTypes,
+    trimmedTenantId: string,
+  ): Promise<Beneficiaries[]> {
+    const claimApiUrl = tenantConfig.config?.claimApis?.v1?.replace(/\/+$/, '');
+    if (!claimApiUrl) {
+      this.logger.warn(
+        `Claim API URL is not configured for tenant: ${trimmedTenantId}`,
+        BrokerService.name,
+        { tenantId: trimmedTenantId },
+      );
+      return [];
+    }
+
+    try {
+      const familyRes = await this.claimApiService.getBeneficiaryFamily(numMaid, claimApiUrl);
+      const list = familyRes?.beneficiaryDetails || familyRes?.BeneficiaryDetails || familyRes || [];
+
+      if (!Array.isArray(list) || list.length === 0) {
+        return [];
+      }
+
+      return list.map((b: any) => {
+        const relRaw = String(b.benefRelName || b.Relation || b.relation || 'Self').trim();
+        const relation = relRaw.toLowerCase() === 'self' ? 'Insured' : relRaw;
+
+        return {
+          MAID: Number(b.benefMediAssistID || b.Maid || b.MAID || numMaid),
+          BenefUserId: Number(b.benefUserID || b.benefUserId || b.UserId || b.benefMediAssistID || numMaid),
+          Name: [b.benefName || b.Name, b.benefLastName].filter(Boolean).join(' ') || 'Insured Member',
+          Relation: relation,
+          Gender: b.sex || b.Gender || b.gender || '',
+          DOB: b.dob || b.DOB || '',
+          PIHMemberId: b.benefNIAPersonID || b.priBenefNIAPersonID || '',
+        };
+      });
+    } catch (familyError) {
+      const err = familyError instanceof Error ? familyError : new Error(String(familyError));
+      this.logger.warn(
+        `Failed to fetch beneficiary family from API, falling back to database: ${err.message}`,
+        BrokerService.name,
+        { maid: numMaid },
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Resolves primary beneficiary from database or defaults as fallback.
+   */
+  private async resolvePrimaryBeneficiaryFallback(
+    numMaid: number,
+    pihNumber: string | undefined,
+    name: string | undefined,
+    tenantConfig: TenantConfigTypes,
+  ): Promise<Beneficiaries> {
+    let resolvedUserId: number = numMaid || 1;
+    let resolvedPih: string = pihNumber ? String(pihNumber).trim() : '';
+    let resolvedName: string = name?.trim() || 'Insured Member';
+    let resolvedGender = '';
+    let resolvedDob = '';
+
+    const dbConfig = tenantConfig.config?.database;
+    const queryTarget = numMaid > 0 ? numMaid : resolvedPih;
+
+    if (dbConfig && queryTarget) {
+      const dbStart = Date.now();
+      try {
+        const pool = await this.sqlServerService.getPool(dbConfig);
+
+        const row = await pool
+          .request()
+          .input('id', queryTarget)
+          .query(
+            `SELECT TOP 1 BenefUserID, BenefMediAssistID, BenefNIAPersonID, BenefName, BenefLastName, BenefSex, BenefDOB
+             FROM Lawton.dbo.tblmabeneficiary WITH(NOLOCK)
+             WHERE BenefMediAssistID = @id OR BenefNIAPersonID = CAST(@id AS VARCHAR(50)) OR BenefUserID = TRY_CAST(@id AS INT)`,
+          );
+
+        if (row.recordset && row.recordset.length > 0) {
+          const b = row.recordset[0];
+          resolvedUserId = Number(b.BenefUserID) || resolvedUserId;
+          resolvedPih = b.BenefNIAPersonID || resolvedPih;
+          resolvedName = [b.BenefName, b.BenefLastName].filter(Boolean).join(' ') || resolvedName;
+          resolvedGender = b.BenefSex || '';
+          resolvedDob = b.BenefDOB ? String(b.BenefDOB) : '';
+
+          this.logger.debug(
+            `Resolved primary beneficiary from DB in ${Date.now() - dbStart}ms`,
+            BrokerService.name,
+            { queryTarget, resolvedUserId, resolvedPih },
+          );
+        }
+      } catch (dbErr) {
+        const err = dbErr instanceof Error ? dbErr : new Error(String(dbErr));
+        this.logger.warn(
+          `Failed resolving BenefUserID from DB in member-claim-data fallback: ${err.message}`,
+          BrokerService.name,
+          { queryTarget },
+        );
+      }
+    }
+
+    return {
+      MAID: numMaid || 1,
+      BenefUserId: resolvedUserId,
+      Name: resolvedName,
+      Relation: 'Insured',
+      Gender: resolvedGender,
+      DOB: resolvedDob,
+      PIHMemberId: resolvedPih,
+    };
   }
 }
