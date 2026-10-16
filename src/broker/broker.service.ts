@@ -165,7 +165,12 @@ export class BrokerService {
     let ids: number[] = [];
     const brokerId = String(user?.brokerId || '');
     if (brokerId) {
-      const resp = await this.claimApiService.searchPoliciesByAgent(brokerId, [tenantConfig.config.additionalConfigs.allowedTPAIds], host);
+      const claimApiUrl = (tenantConfig.config?.claimApis?.v1 || tenantConfig.config?.claimApis?.v2 || '').replace(/\/+$/, '');
+      const resp = await this.claimApiService.searchPoliciesByAgent(
+        brokerId,
+        [tenantConfig.config?.additionalConfigs?.allowedTPAIds],
+        claimApiUrl,
+      );
       const headers: any[] = resp?.PolicyHeaders || resp?.policyHeaders || [];
       ids = [...new Set(
         headers

@@ -76,6 +76,6 @@ export class HRController {
             throw new BadRequestException('x-tenant-id header is required');
         }
         const requestedRole = (roleHeader || altRoleHeader || 'hr').trim();
-        return this.hrService.getPolicyDetailsMWC(tenantId, user, requestedRole,host);
+        return this.hrService.getPolicyDetailsMWC(tenantId, user, requestedRole, host);
     }
 }

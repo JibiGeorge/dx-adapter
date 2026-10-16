@@ -33,10 +33,42 @@ const CORP_FALLBACK_POLICIES: Record<number, Array<{ PolId: number; PolNo: strin
         { PolId: 412855, PolNo: 'HS256577', DBType: '' },
         { PolId: 412912, PolNo: 'HS256581', DBType: '' },
         { PolId: 412857, PolNo: 'HS256599', DBType: '' },
-        { PolId: 412856, PolNo: 'HS257578', DBType: '' },
         { PolId: 412825, PolNo: 'TP/BPS/12345', DBType: '' },
     ],
 };
+
+function toSubCorpItem(corpId: number, corpName: string): SubCorpItem {
+    const idStr = String(corpId);
+    const nameStr = corpName.trim();
+    return {
+        Value: idStr,
+        Text: nameStr,
+        value: idStr,
+        text: nameStr,
+        corpId,
+        corpName: nameStr,
+    };
+}
+
+const MWC_BROKER_FALLBACKS: SubCorpItem[] = [
+    toSubCorpItem(1422143, 'ags_infotech'),
+    toSubCorpItem(1422123, 'Apex Solution '),
+    toSubCorpItem(1422130, 'Bangkok International Academy (BIA)'),
+    toSubCorpItem(1422104, 'Bangkok Patana School'),
+    toSubCorpItem(1422138, 'ELTS Corporate'),
+    toSubCorpItem(1422145, 'ESPN Tech Solutions'),
+    toSubCorpItem(1422136, 'International School Bangkok'),
+    toSubCorpItem(1422147, 'Madridtech'),
+    toSubCorpItem(1422146, 'PIH - WORLDWIDE HEALTHCARE PLAN'),
+    toSubCorpItem(1422144, 'SPGS International School Bangkok'),
+].sort((a, b) => a.corpName.localeCompare(b.corpName));
+
+const MWC_LAWTON_FALLBACKS: SubCorpItem[] = [
+    toSubCorpItem(1422130, 'Bangkok International Academy (BIA)'),
+    toSubCorpItem(1422104, 'Bangkok Patana School'),
+].sort((a, b) => a.corpName.localeCompare(b.corpName));
+
+
 
 @Injectable()
 export class HRService {
@@ -569,119 +601,140 @@ export class HRService {
         }
     }
 
-    async getPolicyDetailsMWC(tenantId: string, user: UserSessionPayload, requestedRole: string, host: string) {
+    async getPolicyDetailsMWC(
+        tenantId: string,
+        user: UserSessionPayload,
+        requestedRole: string,
+        host: string,
+    ) {
+        const startedAt = Date.now();
         const normalizedTenantId = tenantId.trim();
+        const normalizedHost = (host || '').toLowerCase();
         const today = new Date();
         today.setHours(0, 0, 0, 0);
+        const todayTimestamp = today.getTime();
+
+        this.logger.log('Fetching policy details MWC', HRService.name, {
+            tenantId: normalizedTenantId,
+            userId: user?.userId,
+            requestedRole,
+            host: normalizedHost,
+        });
 
         const tenantConfig: TenantConfigTypes =
-            await this.tenantService.getFullTenantById(
-                normalizedTenantId,
-            );
+            await this.tenantService.getFullTenantById(normalizedTenantId);
 
         if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
             throw new InternalServerErrorException('Tenant not found');
         }
 
-        const defaultCorpId = this.getCorpId(tenantConfig, user) as number;
+        const defaultCorpId = Number(this.getCorpId(tenantConfig, user) || 0);
         const providerCorpId = Number(user.providerCorpId || 0);
         const providerGroupCorpId = Number(user.providerGroupCorpId || 0);
 
+        const claimApis = tenantConfig.config?.claimApis;
+        const claimApiUrl = (claimApis?.v2 || claimApis?.v1 || '').replace(/\/+$/, '');
+        const claimApiKey = claimApis?.v2Key || '';
+
         try {
             let subCorporates: SubCorpItem[] = [];
+            let resolutionStrategy = 'unknown';
 
+            // Branch 1: Broker Role Resolution
             if (requestedRole === 'broker') {
+                resolutionStrategy = 'broker';
                 try {
-                    const brokerCorpIds = await this.brokerService.resolveBrokerCorpIds(user, tenantConfig, host);
-                    if (brokerCorpIds.length > 0) {
-                        const claimApis = tenantConfig.config?.claimApis;
-                        const claimApiUrl = claimApis?.v1?.replace(/\/+$/, '');
-
-                        if (!claimApiUrl) {
-                            throw new InternalServerErrorException(
-                                'Claim API URL is not configured for this tenant.',
-                            );
-                        }
+                    const brokerCorpIds = await this.brokerService.resolveBrokerCorpIds(user, tenantConfig, normalizedHost);
+                    if (brokerCorpIds.length > 0 && claimApiUrl) {
                         const policyResponse = await this.claimService.searchPolicies(
                             brokerCorpIds,
-                            claimApis?.v2 || '',
-                            claimApis?.v2Key || '',
+                            claimApiUrl,
+                            claimApiKey,
                             normalizedTenantId,
-                            false
+                            false,
                         );
                         const policyHeaders: any[] = policyResponse?.policyDetails || policyResponse?.PolicyHeaders || [];
 
                         const activeCorpMap = new Map<number, string>();
-                        for (const pol of policyHeaders) {
-                            const isFutureOrToday = !pol.polEndDate || parseDotNetDate(pol.polEndDate) >= today;
+                        for (let i = 0; i < policyHeaders.length; i++) {
+                            const pol = policyHeaders[i];
+                            if (!pol) continue;
+
+                            const endDateRaw = pol.polEndDate || pol.PolEndDate || pol.endDate || pol.EndDate;
+                            const parsedDate = safeParseDotNetDate(endDateRaw);
+                            const isFutureOrToday = !parsedDate || parsedDate.getTime() >= todayTimestamp;
+
                             if (isFutureOrToday) {
                                 const cid = Number(pol.pol_CorporateId ?? pol.CorporateId ?? pol.corporateId ?? 0);
-                                const cname = String(pol.polHolderName ?? pol.PolicyHolderName ?? pol.corporateName ?? '');
+                                const cname = String(pol.polHolderName ?? pol.PolicyHolderName ?? pol.corporateName ?? '').trim();
                                 if (cid > 0 && cname && !activeCorpMap.has(cid)) {
-                                    activeCorpMap.set(cid, cname.trim());
+                                    activeCorpMap.set(cid, cname);
                                 }
                             }
                         }
 
                         const sortedEntries = Array.from(activeCorpMap.entries()).sort((a, b) => a[1].localeCompare(b[1]));
                         for (const [cid, cname] of sortedEntries) {
-                            subCorporates.push({
-                                Value: String(cid),
-                                Text: cname,
-                                value: String(cid),
-                                text: cname,
-                                corpId: cid,
-                                corpName: cname,
-                            });
+                            subCorporates.push(toSubCorpItem(cid, cname));
                         }
                     }
                 } catch (error) {
                     const err = error instanceof Error ? error : new Error(String(error));
-                    this.logger.warn('Failed to resolve active corporates for broker:', err.message)
+                    this.logger.warn(
+                        `Failed to resolve active corporates for broker: ${err.message}`,
+                        HRService.name,
+                        { tenantId: normalizedTenantId, userId: user?.userId, error: err.message },
+                    );
                 }
 
                 if (subCorporates.length === 0) {
-                    const fallback = [
-                        { corpId: 1422143, corpName: 'ags_infotech' },
-                        { corpId: 1422123, corpName: 'Apex Solution ' },
-                        { corpId: 1422130, corpName: 'Bangkok International Academy (BIA)' },
-                        { corpId: 1422104, corpName: 'Bangkok Patana School' },
-                        { corpId: 1422138, corpName: 'ELTS Corporate' },
-                        { corpId: 1422145, corpName: 'ESPN Tech Solutions' },
-                        { corpId: 1422136, corpName: 'International School Bangkok' },
-                        { corpId: 1422147, corpName: 'Madridtech' },
-                        { corpId: 1422146, corpName: 'PIH - WORLDWIDE HEALTHCARE PLAN' },
-                        { corpId: 1422144, corpName: 'SPGS International School Bangkok' },
-                    ].sort((a, b) => a.corpName.localeCompare(b.corpName));
-                    for (const c of fallback) {
-                        subCorporates.push({
-                            Value: String(c.corpId),
-                            Text: c.corpName,
-                            value: String(c.corpId),
-                            text: c.corpName,
-                            corpId: c.corpId,
-                            corpName: c.corpName,
-                        });
-                    }
+                    subCorporates = [...MWC_BROKER_FALLBACKS];
+                    this.logger.debug(
+                        `Using broker fallback list (${subCorporates.length} corporates)`,
+                        HRService.name,
+                        { tenantId: normalizedTenantId, userId: user?.userId },
+                    );
                 }
+
+                const selectedCorp = subCorporates[0];
+                const durationMs = Date.now() - startedAt;
+                this.logger.log(
+                    `Successfully resolved MWC details for broker in ${durationMs}ms`,
+                    HRService.name,
+                    {
+                        tenantId: normalizedTenantId,
+                        userId: user?.userId,
+                        subCorporatesCount: subCorporates.length,
+                        selectedCorpId: selectedCorp?.corpId,
+                        strategy: resolutionStrategy,
+                        durationMs,
+                    },
+                );
 
                 return {
                     success: true,
-                    corporateName: subCorporates[0]?.corpName || '',
-                    corpId: subCorporates[0]?.corpId || 0,
+                    corporateName: selectedCorp?.corpName || '',
+                    corpId: selectedCorp?.corpId || 0,
                     subCorporates,
                     corporates: subCorporates,
-                }
+                };
             }
 
+            // Branch 2: Group HR Login with SubCorporates
             let effectiveGroupCorpId = providerGroupCorpId;
             if (!effectiveGroupCorpId || effectiveGroupCorpId <= 0) {
                 if (
                     providerCorpId === 1422104 ||
                     defaultCorpId === 1041805 ||
                     defaultCorpId === 1422104 ||
-                    host.includes('lawton') ||
-                    host.includes('localhost')
+                    normalizedHost.includes('lawton') ||
+                    normalizedHost.includes('localhost')
                 ) {
                     effectiveGroupCorpId = 1422104;
                 } else if (providerCorpId > 0) {
@@ -689,16 +742,24 @@ export class HRService {
                 }
             }
 
-            // 1. Group HR login with SubCorporates: resolve candidate sub-corporates and filter by active policies
-            if (effectiveGroupCorpId > 0) {
+            if (effectiveGroupCorpId > 0 && claimApiUrl) {
+                resolutionStrategy = 'groupHR';
                 try {
-                    const groupResp = await this.claimService.searchPoliciesByGroupCorp(effectiveGroupCorpId, tenantId, tenantConfig.config?.claimApis?.v2, tenantConfig.config?.claimApis?.v2Key, false);
+                    const groupResp = await this.claimService.searchPoliciesByGroupCorp(
+                        effectiveGroupCorpId,
+                        normalizedTenantId,
+                        claimApiUrl,
+                        claimApiKey,
+                        false,
+                    );
                     const groupPolicies: any = groupResp?.policyDetails || groupResp?.PolicyHeaders || [];
 
                     const candidateMap = new Map<number, string>();
-                    for (const p of groupPolicies) {
+                    for (let i = 0; i < groupPolicies.length; i++) {
+                        const p = groupPolicies[i];
+                        if (!p) continue;
                         const cid = Number(p.pol_CorporateId ?? p.CorporateId ?? p.corporateId ?? 0);
-                        const cname = String(p.polHolderName ?? p.PolicyHolderName ?? p.corporateName ?? '');
+                        const cname = String(p.polHolderName ?? p.PolicyHolderName ?? p.corporateName ?? '').trim();
                         if (cid > 0 && cname && !candidateMap.has(cid)) {
                             candidateMap.set(cid, cname);
                         }
@@ -706,148 +767,171 @@ export class HRService {
 
                     const candidateCorpIds = Array.from(candidateMap.keys());
                     if (candidateCorpIds.length > 0) {
-                        const policyResponse = await this.claimService.searchPolicies(candidateCorpIds, tenantConfig.config?.claimApis?.v2, tenantConfig.config?.claimApis?.v2Key, normalizedTenantId, false);
+                        const policyResponse = await this.claimService.searchPolicies(
+                            candidateCorpIds,
+                            claimApiUrl,
+                            claimApiKey,
+                            normalizedTenantId,
+                            false,
+                        );
                         const policyHeaders: any[] = policyResponse?.policyDetails || policyResponse?.PolicyHeaders || [];
 
                         // Active corporates: PolEndDate >= DateTime.Today
                         const activeCorpIdSet = new Set<number>();
-                        for (const pol of policyHeaders) {
+                        for (let i = 0; i < policyHeaders.length; i++) {
+                            const pol = policyHeaders[i];
+                            if (!pol) continue;
                             const cid = Number(pol.pol_CorporateId ?? pol.CorporateId ?? pol.corporateId ?? 0);
-                            if (!cid) continue;
-                            const isFutureOrToday = !pol.polEndDate || parseDotNetDate(pol.polEndDate) >= today;
+                            if (cid <= 0) continue;
+
+                            const endDateRaw = pol.polEndDate || pol.PolEndDate || pol.endDate || pol.EndDate;
+                            const parsedDate = safeParseDotNetDate(endDateRaw);
+                            const isFutureOrToday = !parsedDate || parsedDate.getTime() >= todayTimestamp;
                             if (isFutureOrToday) {
                                 activeCorpIdSet.add(cid);
                             }
                         }
 
                         for (const [cid, cname] of candidateMap.entries()) {
-                            if (activeCorpIdSet.has(cid) || activeCorpIdSet.size === 0) {
-                                subCorporates.push({
-                                    Value: String(cid),
-                                    Text: cname,
-                                    value: String(cid),
-                                    text: cname,
-                                    corpId: cid,
-                                    corpName: cname,
-                                });
+                            if (activeCorpIdSet.size === 0 || activeCorpIdSet.has(cid)) {
+                                subCorporates.push(toSubCorpItem(cid, cname));
                             }
                         }
                         subCorporates.sort((a, b) => a.corpName.localeCompare(b.corpName));
                     }
                 } catch (error) {
                     const err = error instanceof Error ? error : new Error(String(error));
-                    this.logger.warn('Failed to resolve active sub-corporates for group HR:', err.message)
+                    this.logger.warn(
+                        `Failed to resolve active sub-corporates for group HR: ${err.message}`,
+                        HRService.name,
+                        { tenantId: normalizedTenantId, userId: user?.userId, effectiveGroupCorpId, error: err.message },
+                    );
                 }
             }
 
-            // 2. Single corporate (no SubCorporates found): create list from available corporates with active policies
-            if (subCorporates.length === 0 && defaultCorpId > 0) {
-                const accessibleCorpIds = await this.brokerService.resolveBrokerCorpIds(user, tenantConfig, host);
+            // Branch 3: Single Corporate
+            if (subCorporates.length === 0 && defaultCorpId > 0 && claimApiUrl) {
+                resolutionStrategy = 'singleCorporate';
+                const accessibleCorpIds = await this.brokerService.resolveBrokerCorpIds(user, tenantConfig, normalizedHost);
                 const searchCorpIds: number[] = accessibleCorpIds.length > 0 ? [...accessibleCorpIds] : [defaultCorpId];
                 if (providerCorpId > 0 && !searchCorpIds.includes(providerCorpId)) {
                     searchCorpIds.push(providerCorpId);
                 }
 
                 try {
-                    const policyResponse = await this.claimService.searchPolicies(searchCorpIds, tenantConfig.config.claimApis.v2 || '', tenantConfig.config.claimApis.v2Key, normalizedTenantId, false);
+                    const policyResponse = await this.claimService.searchPolicies(
+                        searchCorpIds,
+                        claimApiUrl,
+                        claimApiKey,
+                        normalizedTenantId,
+                        false,
+                    );
                     const policyHeaders: any[] = policyResponse?.policyDetails || policyResponse?.PolicyHeaders || [];
 
                     const activeCorpMap = new Map<number, string>();
-                    for (const pol of policyHeaders) {
-                        const isFutureOrToday = !pol.polEndDate || parseDotNetDate(pol.polEndDate) >= today;
-                        if (isFutureOrToday) {
-                            const cid = Number(pol.pol_CorporateId ?? pol.CorporateId ?? pol.corporateId ?? 0);
-                            const cname = String(pol.polHolderName ?? pol.PolicyHolderName ?? pol.corporateName ?? '');
-                            if (cid > 0 && cname && !activeCorpMap.has(cid)) {
-                                activeCorpMap.set(cid, cname);
-                            }
+                    const allCorpMap = new Map<number, string>();
+
+                    for (let i = 0; i < policyHeaders.length; i++) {
+                        const pol = policyHeaders[i];
+                        if (!pol) continue;
+                        const cid = Number(pol.pol_CorporateId ?? pol.CorporateId ?? pol.corporateId ?? 0);
+                        const cname = String(pol.polHolderName ?? pol.PolicyHolderName ?? pol.corporateName ?? '').trim();
+                        if (cid <= 0 || !cname) continue;
+
+                        if (!allCorpMap.has(cid)) {
+                            allCorpMap.set(cid, cname);
+                        }
+
+                        const endDateRaw = pol.polEndDate || pol.PolEndDate || pol.endDate || pol.EndDate;
+                        const parsedDate = safeParseDotNetDate(endDateRaw);
+                        const isFutureOrToday = !parsedDate || parsedDate.getTime() >= todayTimestamp;
+                        if (isFutureOrToday && !activeCorpMap.has(cid)) {
+                            activeCorpMap.set(cid, cname);
                         }
                     }
 
-                    // Fallback: if all policies are inactive or have historical dates, include all distinct corporates from policies
-                    if (activeCorpMap.size === 0) {
-                        for (const pol of policyHeaders) {
-                            const cid = Number(pol.pol_CorporateId ?? pol.CorporateId ?? pol.corporateId ?? 0);
-                            const cname = String(pol.polHolderName ?? pol.PolicyHolderName ?? pol.corporateName ?? '');
-                            if (cid > 0 && cname && !activeCorpMap.has(cid)) {
-                                activeCorpMap.set(cid, cname);
-                            }
-                        }
-                    }
-
-                    const sortedEntries = Array.from(activeCorpMap.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+                    const targetMap = activeCorpMap.size > 0 ? activeCorpMap : allCorpMap;
+                    const sortedEntries = Array.from(targetMap.entries()).sort((a, b) => a[1].localeCompare(b[1]));
                     for (const [cid, cname] of sortedEntries) {
-                        subCorporates.push({
-                            Value: String(cid),
-                            Text: cname,
-                            value: String(cid),
-                            text: cname,
-                            corpId: cid,
-                            corpName: cname,
-                        });
+                        subCorporates.push(toSubCorpItem(cid, cname));
                     }
                 } catch (err) {
                     const error = err instanceof Error ? err : new Error(String(err));
-                    this.logger.warn('Failed to resolve active corporates for single corporate:', error.message);
+                    this.logger.warn(
+                        `Failed to resolve active corporates for single corporate: ${error.message}`,
+                        HRService.name,
+                        { tenantId: normalizedTenantId, userId: user?.userId, error: error.message },
+                    );
                 }
             }
 
-            // 3. Fallback if still empty (for Lawton / BPS or localhost)
+            // Branch 4: Fallback for Lawton / BPS or localhost
             if (
                 subCorporates.length === 0 &&
                 (defaultCorpId === 1041805 ||
                     defaultCorpId === 1422104 ||
-                    host.includes('lawton') ||
-                    host.includes('localhost') ||
+                    normalizedHost.includes('lawton') ||
+                    normalizedHost.includes('localhost') ||
                     effectiveGroupCorpId === 1422104)
             ) {
-                subCorporates = [
-                    {
-                        Value: '1422130',
-                        Text: 'Bangkok International Academy (BIA)',
-                        value: '1422130',
-                        text: 'Bangkok International Academy (BIA)',
-                        corpId: 1422130,
-                        corpName: 'Bangkok International Academy (BIA)',
-                    },
-                    {
-                        Value: '1422104',
-                        Text: 'Bangkok Patana School',
-                        value: '1422104',
-                        text: 'Bangkok Patana School',
-                        corpId: 1422104,
-                        corpName: 'Bangkok Patana School',
-                    },
-                ];
+                resolutionStrategy = 'lawtonFallback';
+                subCorporates = [...MWC_LAWTON_FALLBACKS];
             }
 
-            // 4. Ultimate fallback if still empty
+            // Branch 5: Ultimate Fallback
             if (subCorporates.length === 0 && defaultCorpId > 0) {
-                const fallbackName = `Corporate ${defaultCorpId}`;
-                subCorporates.push({
-                    Value: String(defaultCorpId),
-                    Text: fallbackName,
-                    value: String(defaultCorpId),
-                    text: fallbackName,
-                    corpId: defaultCorpId,
-                    corpName: fallbackName,
-                });
+                resolutionStrategy = 'defaultCorpFallback';
+                subCorporates.push(toSubCorpItem(defaultCorpId, `Corporate ${defaultCorpId}`));
             }
 
-            // Always sort entities alphabetically by corpName (matching UAT)
             subCorporates.sort((a, b) => a.corpName.localeCompare(b.corpName));
-
             const selectedCorp = subCorporates[0];
+            const durationMs = Date.now() - startedAt;
+
+            this.logger.log(
+                `Successfully resolved MWC details in ${durationMs}ms`,
+                HRService.name,
+                {
+                    tenantId: normalizedTenantId,
+                    userId: user?.userId,
+                    subCorporatesCount: subCorporates.length,
+                    selectedCorpId: selectedCorp?.corpId || defaultCorpId,
+                    strategy: resolutionStrategy,
+                    durationMs,
+                },
+            );
+
             return {
                 success: true,
                 corporateName: selectedCorp?.corpName || '',
                 corpId: selectedCorp?.corpId || defaultCorpId,
                 subCorporates,
                 corporates: subCorporates,
-            }
+            };
 
         } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error while resolving policy details MWC after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                {
+                    tenantId: normalizedTenantId,
+                    userId: user?.userId,
+                    requestedRole,
+                    host: normalizedHost,
+                    durationMs,
+                },
+            );
+            return {
+                success: false,
+                error: 'Internal server error resolving policy details',
+                corporateName: '',
+                corpId: defaultCorpId,
+                subCorporates: [],
+                corporates: [],
+            };
         }
-
     }
 }
