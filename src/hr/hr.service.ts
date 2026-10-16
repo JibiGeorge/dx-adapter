@@ -289,6 +289,12 @@ export class HRService {
             );
 
         if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
             throw new InternalServerErrorException('Tenant not found');
         }
 
@@ -300,9 +306,15 @@ export class HRService {
         );
 
         const claimApis = tenantConfig.config?.claimApis;
-        const claimApiUrl = claimApis?.v1?.replace(/\/+$/, '');
+        const claimApiUrl = (claimApis?.v2 || claimApis?.v1 || '').replace(/\/+$/, '');
 
         if (!claimApiUrl) {
+            this.logger.error(
+                `Claim API URL is not configured for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId, corpIds },
+            );
             throw new InternalServerErrorException(
                 'Claim API URL is not configured for this tenant.',
             );
@@ -312,25 +324,64 @@ export class HRService {
             const policiesRes =
                 await this.claimService.searchPolicies(
                     corpIds,
-                    claimApis?.v2 || '',
+                    claimApiUrl,
                     claimApis?.v2Key || '',
                     normalizedTenantId,
                     false,
                 );
 
-            const policiesList = policiesRes?.policyDetails || [];
+            const policiesList: any[] = policiesRes?.policyDetails || policiesRes?.PolicyHeaders || [];
             const today = new Date();
-            const activePolicies = policiesList
-                .filter((p: any) => {
-                    if (!p.polEndDate) return true;
+            today.setHours(0, 0, 0, 0);
+            const todayTimestamp = today.getTime();
 
-                    const endDate = safeParseDotNetDate(p.polEndDate);
-                    return endDate ? endDate >= today : true;
-                })
-                .filter(
-                    (p: any, index: number, self: any[]) =>
-                        self.findIndex((t: any) => t.polID === p.polID) === index
-                );
+            this.logger.debug(
+                `Received ${policiesList.length} raw policies from Claim API`,
+                HRService.name,
+                { tenantId: normalizedTenantId, corpIds, rawCount: policiesList.length },
+            );
+
+            // O(N) single-pass filtering & deduplication by polID
+            const seenPolIds = new Set<any>();
+            const activePolicies: any[] = [];
+
+            for (let i = 0; i < policiesList.length; i++) {
+                const p = policiesList[i];
+                if (!p) continue;
+
+                const endDateRaw = p.polEndDate || p.PolEndDate || p.endDate || p.EndDate;
+                if (endDateRaw) {
+                    const parsedDate = safeParseDotNetDate(endDateRaw);
+                    if (parsedDate && parsedDate.getTime() < todayTimestamp) {
+                        continue;
+                    }
+                }
+
+                const polId = p.polID ?? p.PolicyId ?? p.PolId;
+                if (polId !== undefined && polId !== null) {
+                    if (seenPolIds.has(polId)) {
+                        continue;
+                    }
+                    seenPolIds.add(polId);
+                }
+
+                activePolicies.push(p);
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.log(
+                `Successfully fetched ${activePolicies.length} active policies in ${durationMs}ms`,
+                HRService.name,
+                {
+                    tenantId: normalizedTenantId,
+                    userId: user?.userId,
+                    corpIds,
+                    rawCount: policiesList.length,
+                    activeCount: activePolicies.length,
+                    durationMs,
+                },
+            );
+
             return { success: true, policies: activePolicies };
 
         } catch (error) {
@@ -344,11 +395,11 @@ export class HRService {
                 `Error while fetching policies after ${durationMs}ms: ${err.message}`,
                 err.stack,
                 HRService.name,
-                { tenantId: normalizedTenantId, userId: user?.userId, durationMs },
+                { tenantId: normalizedTenantId, userId: user?.userId, corpIds, durationMs },
             );
             return {
                 error: "Internal server error fetching HR policies"
-            }
+            };
         }
     }
 
