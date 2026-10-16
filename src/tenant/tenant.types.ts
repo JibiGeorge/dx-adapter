@@ -77,6 +77,7 @@ export interface TenantAuraHealthConfig {
  * Never return this object directly from a public controller.
  */
 export interface TenantInternalConfig {
+  corpId: string | number;
   app: TenantAppConfig;
   auth: TenantAuthConfig;
   services: TenantServicesConfig;
@@ -87,6 +88,14 @@ export interface TenantInternalConfig {
   sms: TenantSmsConfig;
   auraHealth: TenantAuraHealthConfig;
   additionalConfigs: TenantAdditionalConfigs;
+  dataexchange: {
+    api: string;
+  }
+}
+
+export interface TentantDomain {
+  host: string;
+  portal: string;
 }
 
 /**
@@ -96,7 +105,7 @@ export interface TenantInternalConfig {
 export interface TenantConfigTypes {
   status: TenantStatus;
   tenantId: string;
-  domains: string[];
+  domains: TentantDomain[];
   version: number;
   config: TenantInternalConfig;
 }
@@ -121,7 +130,7 @@ export interface TenantPublicConfig {
 export interface TenantPublicResponse {
   status: TenantStatus;
   tenantId: string;
-  domains: string[];
+  domains: TentantDomain[];
   version: number;
   config: TenantPublicConfig;
 }

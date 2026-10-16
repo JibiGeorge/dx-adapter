@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { HttpService } from '../../../common/http/http.service.js';
 import { LoggingService } from '../../../common/logging/logging.service.js';
 import { AgentPolicySearchResponse, GroupCorpPolicyResponse } from './claim-api.types.js';
+import { TenantConfigTypes } from '../../tenant/tenant.types.js';
 
 @Injectable()
 export class ClaimApiService {
@@ -12,7 +13,7 @@ export class ClaimApiService {
 
   async searchPoliciesByAgent(
     brokerId: string | number,
-    allowedTPAIds: number[],
+    allowedTPAIds: string[] | number[],
     baseUrl: string,
   ): Promise<AgentPolicySearchResponse> {
     const cleanUrl = baseUrl.replace(/\/+$/, '');
@@ -124,6 +125,112 @@ export class ClaimApiService {
         { maid, response },
       );
       throw new Error(`Failed to fetch beneficiary family for MAID: ${maid}`);
+    }
+
+    return response;
+  }
+
+  /**
+   * Resolves fallback corporate IDs when agent policy headers are empty or default.
+   * Shared across Broker and HR modules.
+   */
+  async resolveFallbackCorpIds(
+    tenantId: string,
+    user: { brokerId?: string | number; providerGroupCorpId?: string | number },
+    tenantConfig: { config?: { claimApis?: { v2?: string; v2Key?: string } } },
+    isLawton: boolean,
+  ): Promise<number[]> {
+    const groupCorpId = Number(user.providerGroupCorpId || 0);
+    const resolvedIds = new Set<number>();
+
+    const v2Url = tenantConfig.config?.claimApis?.v2;
+    const v2Key = tenantConfig.config?.claimApis?.v2Key || '';
+
+    if (groupCorpId > 0 && v2Url) {
+      try {
+        const groupCorpResponse = await this.searchPoliciesByGroupCorp(
+          groupCorpId,
+          tenantId,
+          v2Url,
+          v2Key,
+          false,
+        );
+
+        const policies = groupCorpResponse?.policyDetails || [];
+        for (const policy of policies) {
+          const cid = Number(policy.pol_CorporateId ?? policy.CorporateId ?? policy.corporateId ?? 0);
+          if (cid > 0) {
+            resolvedIds.add(cid);
+          }
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Failed searching policies by group corp: ${(err as Error).message}`,
+          ClaimApiService.name,
+          { groupCorpId, tenantId },
+        );
+      }
+
+      if (resolvedIds.size === 0) {
+        resolvedIds.add(groupCorpId);
+      }
+    }
+
+    return Array.from(resolvedIds);
+  }
+
+  async searchClaims(
+    baseUrl: string,
+    tenantConfig: TenantConfigTypes,
+    corporateIds: number[],
+    role: string,
+  ) {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/api/v2/ClaimSearch/.json/`;
+
+    // Safely resolve DNSHostName by matching role, falling back to first domain or empty string
+    const matchedDomain =
+      tenantConfig.domains?.find(
+        (domain) => domain?.portal?.toLowerCase() === role?.toLowerCase(),
+      ) || tenantConfig.domains?.[0];
+    const dnsHostName = matchedDomain?.host || '';
+
+    const allowedTPAIds =
+      tenantConfig.config?.additionalConfigs?.allowedTPAIds || '';
+
+    const accessKey = tenantConfig.config?.claimApis?.v2Key || '';
+    const tenantId = tenantConfig.tenantId || '';
+
+    this.logger.debug('Searching claims', ClaimApiService.name, {
+      endpoint,
+      corporateIds,
+      dnsHostName,
+      role,
+    });
+
+    const payload = {
+      DNSHostName: dnsHostName,
+      AllowedTPAIds: allowedTPAIds,
+      CorporateIds: corporateIds,
+      Range: 100,
+      StartIndex: 0,
+    };
+
+    const response = await this.httpService.post<any>(endpoint, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...(accessKey ? { 'X-CA-SHARED-KEY': accessKey } : {}),
+        ...(tenantId ? { Payer: tenantId } : {}),
+      },
+    });
+
+    if (!response?.isSuccess) {
+      this.logger.warn('Claim search failed or returned unsuccessful', ClaimApiService.name, {
+        endpoint,
+        response,
+      });
+
+      return { isSuccess: false, claimSearchResults: [] };
     }
 
     return response;

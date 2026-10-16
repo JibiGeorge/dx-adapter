@@ -48,6 +48,7 @@ export class TenantRepository {
       version: doc.version ?? 1,
 
       config: {
+        corpId: doc.config?.corpId ?? 0,
         app: {
           name: doc.config?.app?.name ?? '',
           url: doc.config?.app?.url ?? '',
@@ -111,6 +112,9 @@ export class TenantRepository {
           hrDashboards: Array.isArray(doc.config?.additionalConfigs?.hrDashboards)
             ? doc.config.additionalConfigs.hrDashboards
             : [],
+        },
+        dataexchange: {
+          api: doc.config?.additionalConfigs?.dataexchange?.api ?? '',
         },
       },
     };
