@@ -37,4 +37,15 @@ export class HRController {
         const requestedRole = (roleHeader || altRoleHeader || 'hr').trim();
         return this.hrService.getHRStatus(tenantId, user, requestedRole);
     }
+
+    @Get('policies')
+    async getPolicies(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+    ): Promise<any> {
+        if(!tenantId.trim()){
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+        return this.hrService.getPolicies(tenantId, user);
+    }
 }

@@ -6,6 +6,7 @@ import { TenantConfigTypes } from "../tenant/tenant.types.js";
 import { TenantService } from "../tenant/tenant.service.js";
 import { LAWTON_TENANT_ID } from "../broker/broker.constants.js";
 import { HRDashboardResponse, HRStatusResponse } from "./hr.types.js";
+import { parseDotNetDate } from "../../utils/date-helper.js";
 
 @Injectable()
 export class HRService {
@@ -240,6 +241,85 @@ export class HRService {
                 { tenantId: normalizedTenantId, userId: user?.userId, durationMs },
             );
             throw new InternalServerErrorException('Internal server error calculating HR stats');
+        }
+    }
+
+    async getPolicies(tenantId: string, user: UserSessionPayload) {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+        const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+        this.logger.log('Fetching policies', HRService.name, {
+            tenantId: normalizedTenantId,
+            userId: user?.userId,
+        });
+
+        const tenantConfig: TenantConfigTypes =
+            await this.tenantService.getFullTenantById(
+                normalizedTenantId,
+            );
+
+        if (!tenantConfig) {
+            throw new InternalServerErrorException('Tenant not found');
+        }
+
+        const corpIds = await this.claimService.resolveFallbackCorpIds(
+            normalizedTenantId,
+            user,
+            tenantConfig,
+            isLawton,
+        );
+
+        const claimApis = tenantConfig.config?.claimApis;
+        const claimApiUrl = claimApis?.v1?.replace(/\/+$/, '');
+
+        if (!claimApiUrl) {
+            throw new InternalServerErrorException(
+                'Claim API URL is not configured for this tenant.',
+            );
+        }
+
+        try {
+            const policiesRes =
+                await this.claimService.searchPolicies(
+                    corpIds,
+                    claimApis?.v2 || '',
+                    claimApis?.v2Key || '',
+                    normalizedTenantId,
+                    false,
+                );
+
+            const policiesList = policiesRes?.policyDetails || [];
+            const today = new Date();
+            const activePolicies = policiesList
+                .filter((p: any) => {
+                    if (!p.polEndDate) return true;
+
+                    const endDate = parseDotNetDate(p.polEndDate);
+                    return endDate >= today;
+                })
+                .filter(
+                    (p: any, index: number, self: any[]) =>
+                        self.findIndex((t: any) => t.polID === p.polID) === index
+                );
+            return { success: true, policies: activePolicies };
+
+        } catch (error) {
+            const err =
+                error instanceof Error
+                    ? error
+                    : new Error(String(error));
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error while fetching policies after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId, durationMs },
+            );
+            return {
+                error: "Internal server error fetching HR policies"
+            }
         }
     }
 }
