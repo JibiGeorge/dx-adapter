@@ -376,18 +376,22 @@ export class AuthService {
       loginScope,
     );
 
-    const address =
-      overrides.address ??
+    const resolvedUpstreamAddress =
+      firstAddress.AddressLine1 ??
+      firstAddress.addressLine1 ??
       baseProfile.Address ??
       baseProfile.address ??
       profile.Address ??
       profile.address ??
       this.getProp(propertyData, 'address') ??
-      firstAddress.AddressLine1 ??
-      firstAddress.addressLine1 ??
       '';
 
-    mobile = overrides.mobile ?? mobile;
+    const address =
+      resolvedUpstreamAddress ||
+      overrides.address ||
+      '';
+
+    mobile = mobile || overrides.mobile || '';
 
     const altMobile =
       overrides.altMobile ??

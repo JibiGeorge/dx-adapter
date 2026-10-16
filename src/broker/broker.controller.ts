@@ -19,6 +19,7 @@ import type { UploadedMulterFile } from './broker.types.js';
 import { GetFormFieldDto } from './dto/form-field.dto.js';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { SubmitClaimDto } from './dto/submit-claim.dto.js';
+import { SearchClientDetailsDto, UpdateBeneficiaryDto } from './dto/client-details.dto.js';
 
 @Controller('broker')
 @UseGuards(JwtAuthGuard, BrokerRoleGuard)
@@ -181,5 +182,85 @@ export class BrokerController {
     }
 
     return this.brokerService.submitClaim(tenantId, user, dto);
+  }
+
+  @Get('client-details/entities')
+  async getClientDetailsEntities(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+  ) {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+    return this.brokerService.getClientDetailsEntities(tenantId, user);
+  }
+
+  @Get('client-details/policies')
+  async getClientDetailsPolicies(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Query('corpId') corpId?: string,
+  ) {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+    return this.brokerService.getClientDetailsPolicies(tenantId, user, corpId ? Number(corpId) : undefined);
+  }
+
+  @Get('client-details/plans')
+  async getClientDetailsPlans(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Query('polId') polId?: string,
+    @Query('polNo') polNo?: string,
+    @Query('corpId') corpId?: string,
+  ) {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+    return this.brokerService.getClientDetailsPlans(
+      tenantId,
+      user,
+      polId ? Number(polId) : undefined,
+      polNo,
+      corpId ? Number(corpId) : undefined,
+    );
+  }
+
+  @Get('client-details/search')
+  async searchClientDetails(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Query() dto: SearchClientDetailsDto,
+  ) {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+    return this.brokerService.searchClientDetails(tenantId, user, dto);
+  }
+
+  @Get('client-details/beneficiary/:maid')
+  async getClientDetailsBeneficiary(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Param('maid') maid: string,
+  ) {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+    return this.brokerService.getClientDetailsBeneficiary(tenantId, user, maid);
+  }
+
+  @Post('client-details/beneficiary/:maid')
+  async updateClientDetailsBeneficiary(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Param('maid') maid: string,
+    @Body() dto: UpdateBeneficiaryDto,
+  ) {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+    return this.brokerService.updateClientDetailsBeneficiary(tenantId, user, maid, dto);
   }
 }

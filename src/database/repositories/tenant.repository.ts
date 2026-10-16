@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectConnection } from '@nestjs/mongoose';
 import { ConfigService } from '@nestjs/config';
 import { Connection, Collection } from 'mongoose';
@@ -6,25 +6,46 @@ import { TenantConfigTypes } from '../../tenant/tenant.types.js';
 
 @Injectable()
 export class TenantRepository {
-  private readonly collection: Collection;
+  private readonly logger = new Logger(TenantRepository.name);
+  private readonly collection: Collection | null = null;
+  private readonly componentCollection: Collection | null = null;
 
   constructor(
     @InjectConnection()
     connection: Connection,
     configService: ConfigService,
   ) {
-    const dbName = configService.getOrThrow<string>('CONFIG_MONGO_DB') || "IPMI_Tenant_STG";
-    const collectionName = configService.getOrThrow<string>('CONFIG_MONGO_COLLECTION') || "TenantConfiguration";
+    const dbName = configService.get<string>('CONFIG_MONGO_DB');
+    const collectionName = configService.get<string>('CONFIG_MONGO_COLLECTION');
+    const componentCollectionName = configService.get<string>('CONFIG_MONGO_COMPONENT_COLLECTION');
 
-    // Switch to the specified database and bind to the named collection
-    this.collection = connection.useDb(dbName).collection(collectionName);
+    if (!dbName) {
+      this.logger.warn('CONFIG_MONGO_DB is not defined in environment. Database connection will be uninitialized.');
+    }
+
+    if (dbName && collectionName) {
+      this.collection = connection.useDb(dbName).collection(collectionName);
+    } else {
+      this.logger.warn('CONFIG_MONGO_COLLECTION or CONFIG_MONGO_DB is not defined in environment. Tenant queries will fail gracefully.');
+    }
+
+    if (dbName && componentCollectionName) {
+      this.componentCollection = connection.useDb(dbName).collection(componentCollectionName);
+    } else {
+      this.logger.warn('CONFIG_MONGO_COMPONENT_COLLECTION or CONFIG_MONGO_DB is not defined in environment. Component queries will fail gracefully.');
+    }
   }
 
   /**
    * Find a tenant by its tentantId.
-   * Returns null when no matching document exists.
+   * Returns null when no matching document exists or when configuration is missing.
    */
   async findByTenantId(tenantId: string): Promise<TenantConfigTypes | null> {
+    if (!this.collection) {
+      this.logger.warn(`Tenant query for '${tenantId}' skipped: TenantConfiguration collection not configured.`);
+      return null;
+    }
+
     const doc = await this.collection.findOne<Record<string, any>>(
       { tenantId },
       { projection: { _id: 0 } },
@@ -114,5 +135,33 @@ export class TenantRepository {
         },
       },
     };
+  }
+
+  /**
+   * Find component configuration by tenantId, portalKey, or role from ComponentConfiguration collection.
+   */
+  async findComponents(filter: { tenantId?: string; portalKey?: string; role?: string }): Promise<any | null> {
+    if (!this.componentCollection) {
+      this.logger.warn('Component configuration query skipped: ComponentConfiguration collection not configured.');
+      return null;
+    }
+
+    const query: Record<string, any> = {};
+    if (filter.portalKey) {
+      query.portalKey = filter.portalKey;
+    }
+    if (filter.tenantId) {
+      query.tenantId = filter.tenantId;
+    }
+    if (filter.role) {
+      query.role = filter.role;
+    }
+
+    const doc = await this.componentCollection.findOne<Record<string, any>>(
+      query,
+      { projection: { _id: 0 } },
+    );
+
+    return doc;
   }
 }

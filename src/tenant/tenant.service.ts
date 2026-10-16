@@ -122,4 +122,28 @@ export class TenantService {
 
     return this.toPublicResponse(tenant);
   }
+
+  /**
+   * Returns component configuration from MongoDB ComponentConfiguration collection.
+   */
+  async getComponents(tenantId?: string, portalKey?: string, role?: string): Promise<any> {
+    const doc = await this.tenantRepository.findComponents({ tenantId, portalKey, role });
+    if (!doc) {
+      return {
+        success: false,
+        message: `No component configuration found for portalKey='${portalKey}', tenantId='${tenantId}'`,
+        components: [],
+      };
+    }
+    const rawComponents = Array.isArray(doc.components) ? doc.components : [];
+    const components = [...rawComponents].sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0));
+    return {
+      success: true,
+      tenantId: doc.tenantId,
+      portalKey: doc.portalKey,
+      portal: doc.portal,
+      role: doc.role,
+      components,
+    };
+  }
 }

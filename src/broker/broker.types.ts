@@ -123,6 +123,54 @@ export interface UploadedMulterFile {
   buffer: Buffer;
 }
 
+export interface ClientDetailsEntity {
+  corpId: number;
+  corpName: string;
+}
 
+export interface ClientDetailsPolicy {
+  polId: number;
+  polNo: string;
+  planName: string;
+  polHolderName: string;
+  startDate: string;
+  endDate: string;
+  corpId: number;
+}
 
+export interface ClientDetailsMember {
+  maid: string;
+  name: string;
+  firstName: string;
+  middleName?: string;
+  lastName: string;
+  emailId: string;
+  staffId: string;
+  pihNumber: string;
+  relation: string;
+  policyStatus: string;
+  inceptionDate: string;
+  startDate: string;
+  endDate: string;
+  memberStatus: 'Active' | 'Inactive';
+  isBenefActive: boolean;
+  planType: string;
+  polNo: string;
+  corpName: string;
+}
 
+export interface ClientDetailsSearchResponse {
+  isSuccess: boolean;
+  totalCount: number;
+  page: number;
+  limit: number;
+  members: ClientDetailsMember[];
+  error?: string;
+}
+
+export interface ClientDetailsBeneficiaryResponse {
+  isSuccess: boolean;
+  data?: Record<string, any>;
+  dependents?: ClientDetailsMember[];
+  message?: string;
+}

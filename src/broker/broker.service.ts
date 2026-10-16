@@ -13,7 +13,13 @@ import {
   SaveBankDetailsResponse,
   UploadClaimDocumentResponse,
   UploadedMulterFile,
+  ClientDetailsEntity,
+  ClientDetailsPolicy,
+  ClientDetailsMember,
+  ClientDetailsSearchResponse,
+  ClientDetailsBeneficiaryResponse,
 } from './broker.types.js';
+import { SearchClientDetailsDto, UpdateBeneficiaryDto } from './dto/client-details.dto.js';
 import { TenantConfigTypes } from '../tenant/tenant.types.js';
 import { TenantService } from '../tenant/tenant.service.js';
 import { ClaimApiService } from '../integrations/claim-api/claim-api.service.js';
@@ -1541,5 +1547,673 @@ export class BrokerService {
       claimRegNo,
       message: isDraft ? 'Draft saved successfully' : 'Claim submitted successfully',
     };
+  }
+
+  // ─── Client Details API ──────────────────────────────────────────────────
+
+  /**
+   * Retrieves unique corporate entities assigned to the broker.
+   */
+  async getClientDetailsEntities(
+    tenantId: string,
+    user: UserSessionPayload,
+  ): Promise<{ isSuccess: boolean; entities: ClientDetailsEntity[] }> {
+    const policyResult = await this.getPolicyList(tenantId, user);
+    const policies = policyResult?.policies || [];
+
+    const entityMap = new Map<number, string>();
+    for (const p of policies) {
+      if (p.corpId && p.corpId > 0 && !entityMap.has(p.corpId)) {
+        entityMap.set(p.corpId, p.polHolderName || `Corporate ${p.corpId}`);
+      }
+    }
+
+    const entities: ClientDetailsEntity[] = Array.from(entityMap.entries()).map(([corpId, corpName]) => ({
+      corpId,
+      corpName,
+    }));
+
+    return { isSuccess: true, entities };
+  }
+
+  /**
+   * Retrieves policies for Client Details, optionally filtered by corpId.
+   */
+  async getClientDetailsPolicies(
+    tenantId: string,
+    user: UserSessionPayload,
+    corpId?: number,
+  ): Promise<{ isSuccess: boolean; policies: ClientDetailsPolicy[] }> {
+    const trimmedTenantId = tenantId.trim();
+    const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
+    const claimApis = tenantConfig.config?.claimApis;
+
+    const parseDate = (raw: any): Date | null => {
+      if (!raw) return null;
+      if (typeof raw === 'string' && raw.includes('/Date(')) {
+        const match = raw.match(/\/Date\((\d+)/);
+        if (match) return new Date(Number(match[1]));
+      }
+      const d = new Date(raw);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
+    const formatDate = (d: Date | null): string => {
+      if (!d) return '';
+      return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-');
+    };
+
+    const policiesMap = new Map<string, ClientDetailsPolicy>();
+
+    // 1. If corpId is specified, call V2 PolicySearch using CorporateIds exactly like legacy GetPoliciesByCorpId
+    if (corpId && Number(corpId) > 0 && claimApis?.v2) {
+      try {
+        const v2Response = await this.claimApiService.searchPolicies(
+          [Number(corpId)],
+          claimApis.v2,
+          claimApis.v2Key || '123412341234',
+          trimmedTenantId,
+          false,
+        );
+
+        const v2Policies = v2Response?.policyDetails ?? (v2Response as any)?.PolicyDetails ?? [];
+        if (Array.isArray(v2Policies)) {
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+
+          for (const p of v2Policies) {
+            const rawPolNo = (p.polNo || p.PolNo || '').toString().trim();
+            if (!rawPolNo) continue;
+
+            const endDate = parseDate(p.polEndDate ?? p.PolEndDate ?? p.endDate ?? p.EndDate);
+            // In legacy portal: pol.PolEndDate >= DateTime.Today
+            if (endDate && endDate < today) {
+              continue;
+            }
+
+            const polId = Number(p.polId ?? p.PolId ?? 0);
+            const polHolderName = (p.polHolderName ?? p.PolHolderName ?? '').toString().trim();
+            const planName = (p.planName ?? p.PlanName ?? '').toString().trim();
+            const startDate = parseDate(p.polStartDate ?? p.PolStartDate ?? p.startDate ?? p.StartDate);
+
+            // Deduplicate by Policy Number (case-insensitive) keeping latest EndDate
+            const key = rawPolNo.toLowerCase();
+            const existing = policiesMap.get(key);
+            if (!existing || (endDate && (!existing.endDate || new Date(existing.endDate) < endDate))) {
+              policiesMap.set(key, {
+                polId,
+                polNo: rawPolNo,
+                planName,
+                polHolderName,
+                startDate: formatDate(startDate),
+                endDate: formatDate(endDate),
+                corpId: Number(corpId),
+              });
+            }
+          }
+        }
+      } catch (apiErr: any) {
+        this.logger.warn(`Failed fetching corporate policies from V2 API: ${apiErr.message}`, BrokerService.name, { corpId });
+      }
+    }
+
+    // 2. Fallback / supplement from SQL Server (Lawton.dbo.tblmapolicy)
+    const dbConfig = tenantConfig.config?.database;
+    if (policiesMap.size === 0 && dbConfig && corpId && Number(corpId) > 0) {
+      try {
+        const pool = await this.sqlServerService.getPool(dbConfig);
+        const dbRes = await pool
+          .request()
+          .input('corpId', Number(corpId))
+          .query(`
+            SELECT DISTINCT PolID, PolNo, PolHolderName, PolStartDate, PolEndDate, PolStatus
+            FROM Lawton.dbo.tblmapolicy WITH(NOLOCK)
+            WHERE Pol_CorporateId = @corpId AND (PolStatus = 'A' OR PolStatus = 'Active' OR PolEndDate >= GETDATE())
+            ORDER BY PolNo ASC
+          `);
+
+        if (dbRes.recordset && dbRes.recordset.length > 0) {
+          for (const r of dbRes.recordset) {
+            const polNo = (r.PolNo || '').trim();
+            if (!polNo) continue;
+            const key = polNo.toLowerCase();
+            if (!policiesMap.has(key)) {
+              policiesMap.set(key, {
+                polId: Number(r.PolID) || 0,
+                polNo,
+                planName: '',
+                polHolderName: (r.PolHolderName || '').trim(),
+                startDate: formatDate(parseDate(r.PolStartDate)),
+                endDate: formatDate(parseDate(r.PolEndDate)),
+                corpId: Number(corpId),
+              });
+            }
+          }
+        }
+      } catch (dbErr: any) {
+        this.logger.warn(`Failed fetching corporate policies from DB: ${dbErr.message}`, BrokerService.name, { corpId });
+      }
+    }
+
+    // 3. Fallback to broker's general policy list if still empty
+    if (policiesMap.size === 0) {
+      const policyResult = await this.getPolicyList(trimmedTenantId, user);
+      let policies = policyResult?.policies || [];
+      if (corpId && Number(corpId) > 0) {
+        policies = policies.filter((p: any) => Number(p.corpId) === Number(corpId));
+      }
+      for (const p of policies) {
+        const polNo = (p.polNo || '').trim();
+        if (polNo && !policiesMap.has(polNo.toLowerCase())) {
+          policiesMap.set(polNo.toLowerCase(), {
+            polId: p.polId,
+            polNo,
+            planName: p.planName || '',
+            polHolderName: p.polHolderName || '',
+            startDate: String(p.startDate || ''),
+            endDate: String(p.endDate || ''),
+            corpId: p.corpId || 0,
+          });
+        }
+      }
+    }
+
+    // Sort alphabetically by polNo
+    const sorted = Array.from(policiesMap.values()).sort((a, b) =>
+      a.polNo.localeCompare(b.polNo, undefined, { sensitivity: 'base' })
+    );
+
+    return { isSuccess: true, policies: sorted };
+  }
+
+  /**
+   * Retrieves distinct plan names for a policy.
+   */
+  async getClientDetailsPlans(
+    tenantId: string,
+    user: UserSessionPayload,
+    polId?: number,
+    polNo?: string,
+    corpId?: number,
+  ): Promise<{ isSuccess: boolean; plans: string[] }> {
+    const trimmedTenantId = tenantId.trim();
+    const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
+    const dbConfig = tenantConfig.config?.database;
+
+    const plansSet = new Set<string>();
+
+    // 1. Query Lawton.dbo.vwPolicyPlanType (the exact query from legacy BrokerHomeController.GetPoliciesPlanTypeById)
+    if (dbConfig && polNo?.trim()) {
+      try {
+        const pool = await this.sqlServerService.getPool(dbConfig);
+        const res = await pool
+          .request()
+          .input('polNo', polNo.trim())
+          .query(`
+            SELECT DISTINCT PlanName, PolNo, PLANPOLID 
+            FROM Lawton.dbo.vwPolicyPlanType WITH(NOLOCK)
+            WHERE PolNo = @polNo AND PlanName IS NOT NULL AND RTRIM(LTRIM(PlanName)) <> ''
+            ORDER BY PlanName ASC
+          `);
+
+        if (res.recordset && res.recordset.length > 0) {
+          for (const r of res.recordset) {
+            const name = (r.PlanName || '').toString().trim();
+            if (name) plansSet.add(name);
+          }
+        }
+      } catch (err: any) {
+        this.logger.warn(`Failed fetching plans from vwPolicyPlanType: ${err.message}`, BrokerService.name, { polNo });
+      }
+    }
+
+    // 2. Query Lawton.dbo.data_table for program_plan for this policy
+    if (dbConfig && polNo?.trim() && plansSet.size === 0) {
+      try {
+        const pool = await this.sqlServerService.getPool(dbConfig);
+        const res = await pool
+          .request()
+          .input('polNo', polNo.trim())
+          .query(`
+            SELECT DISTINCT program_plan 
+            FROM Lawton.dbo.data_table WITH(NOLOCK)
+            WHERE policy_no = @polNo AND program_plan IS NOT NULL AND RTRIM(LTRIM(program_plan)) <> ''
+            ORDER BY program_plan ASC
+          `);
+
+        if (res.recordset && res.recordset.length > 0) {
+          for (const r of res.recordset) {
+            const name = (r.program_plan || '').toString().trim();
+            if (name) plansSet.add(name);
+          }
+        }
+      } catch (err: any) {
+        this.logger.warn(`Failed fetching plans from data_table: ${err.message}`, BrokerService.name, { polNo });
+      }
+    }
+
+    // 3. Fallback from policy list
+    if (plansSet.size === 0) {
+      const policyResult = await this.getPolicyList(trimmedTenantId, user);
+      let policies = policyResult?.policies || [];
+      if (polNo?.trim()) {
+        policies = policies.filter((p: any) => (p.polNo || '').toLowerCase() === polNo.trim().toLowerCase());
+      } else if (polId && Number(polId) > 0) {
+        policies = policies.filter((p: any) => Number(p.polId) === Number(polId));
+      }
+      for (const p of policies) {
+        if (p.planName?.trim()) {
+          plansSet.add(p.planName.trim());
+        }
+      }
+    }
+
+    const sortedPlans = Array.from(plansSet).sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' })
+    );
+
+    return { isSuccess: true, plans: sortedPlans };
+  }
+
+  /**
+   * Searches members/beneficiaries across Lawton.dbo.data_table with pagination.
+   */
+  async searchClientDetails(
+    tenantId: string,
+    user: UserSessionPayload,
+    dto: SearchClientDetailsDto,
+  ): Promise<ClientDetailsSearchResponse> {
+    const startedAt = Date.now();
+    const trimmedTenantId = tenantId.trim();
+    const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
+    const dbConfig = tenantConfig.config?.database;
+
+    if (!dbConfig) {
+      throw new InternalServerErrorException('Database configuration is missing for this tenant.');
+    }
+
+    const page = Math.max(1, Number(dto.page) || 1);
+    const limit = Math.max(1, Math.min(100, Number(dto.limit) || 20));
+    const offset = (page - 1) * limit;
+
+    try {
+      const pool = await this.sqlServerService.getPool(dbConfig);
+      const req = pool.request();
+
+      const conditions: string[] = ['1=1'];
+
+      if (dto.corpId && Number(dto.corpId) > 0) {
+        req.input('corpId', Number(dto.corpId));
+        conditions.push('corp_id = @corpId');
+      }
+
+      if (dto.polId && Number(dto.polId) > 0) {
+        req.input('polId', Number(dto.polId));
+        conditions.push('pol_id = @polId');
+      }
+
+      if (dto.plan?.trim()) {
+        req.input('plan', `%${dto.plan.trim()}%`);
+        conditions.push('program_plan LIKE @plan');
+      }
+
+      if (dto.name?.trim()) {
+        req.input('name', `%${dto.name.trim()}%`);
+        conditions.push('(first_name LIKE @name OR last_name LIKE @name)');
+      }
+
+      if (dto.email?.trim()) {
+        req.input('email', `%${dto.email.trim()}%`);
+        conditions.push('email LIKE @email');
+      }
+
+      if (dto.staffId?.trim()) {
+        req.input('staffId', `%${dto.staffId.trim()}%`);
+        conditions.push('(staff_id_no LIKE @staffId OR emp_id LIKE @staffId)');
+      }
+
+      const whereClause = conditions.join(' AND ');
+
+      req.input('offset', offset);
+      req.input('limit', limit);
+
+      const countQuery = `SELECT COUNT(1) AS totalCount FROM Lawton.dbo.data_table WITH(NOLOCK) WHERE ${whereClause}`;
+      const dataQuery = `
+        SELECT 
+          id, pol_id, corp_id, first_name, middle_name, last_name, staff_id_no, emp_id,
+          pih_member_no, relationship, relation, policy_status, program_plan,
+          original_entry_date, effective_date, expiry_date, is_active, email,
+          mobile_number, policy_no, company_name, maid, id_passport_no, nationality,
+          sum_assured, coverage_area, physical_address, dob, gender, marital_status
+        FROM Lawton.dbo.data_table WITH(NOLOCK)
+        WHERE ${whereClause}
+        ORDER BY id DESC
+        OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
+      `;
+
+      const [countResult, dataResult] = await Promise.all([
+        req.query(countQuery),
+        req.query(dataQuery),
+      ]);
+
+      const totalCount = Number(countResult.recordset[0]?.totalCount) || 0;
+      const rows = dataResult.recordset || [];
+
+      const members: ClientDetailsMember[] = rows.map((r: any) => {
+        const fullName = [r.first_name, r.middle_name, r.last_name]
+          .filter(Boolean)
+          .join(' ')
+          .trim() || 'Insured Member';
+
+        const fmtDate = (d: any) => {
+          if (!d) return '-';
+          try {
+            const dt = new Date(d);
+            return isNaN(dt.getTime())
+              ? String(d)
+              : dt.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-');
+          } catch {
+            return String(d);
+          }
+        };
+
+        const activeBool = r.is_active === true || r.is_active === 1 || String(r.policy_status).toLowerCase() === 'active';
+
+        return {
+          maid: String(r.maid || r.id),
+          name: fullName,
+          firstName: r.first_name || '',
+          middleName: r.middle_name || '',
+          lastName: r.last_name || '',
+          emailId: r.email || '',
+          staffId: r.staff_id_no || r.emp_id || '',
+          pihNumber: r.pih_member_no || '',
+          relation: r.relationship || r.relation || 'Insured',
+          policyStatus: r.policy_status || (activeBool ? 'Active' : 'Inactive'),
+          inceptionDate: fmtDate(r.original_entry_date || r.effective_date),
+          startDate: fmtDate(r.effective_date),
+          endDate: fmtDate(r.expiry_date),
+          memberStatus: activeBool ? 'Active' : 'Inactive',
+          isBenefActive: activeBool,
+          planType: r.program_plan || '',
+          polNo: r.policy_no || '',
+          corpName: r.company_name || '',
+        };
+      });
+
+      this.logger.log(`Client Details search completed: found ${totalCount} records in ${Date.now() - startedAt}ms`, BrokerService.name, {
+        tenantId: trimmedTenantId,
+        totalCount,
+        page,
+        limit,
+      });
+
+      return {
+        isSuccess: true,
+        totalCount,
+        page,
+        limit,
+        members,
+      };
+    } catch (err: any) {
+      this.logger.error(`Error searching client details: ${err.message}`, err.stack, BrokerService.name, {
+        tenantId: trimmedTenantId,
+      });
+      return {
+        isSuccess: false,
+        totalCount: 0,
+        page,
+        limit,
+        members: [],
+        error: 'Unable to search client details. Please try again.',
+      };
+    }
+  }
+
+  /**
+   * Retrieves single beneficiary details and dependent family records.
+   */
+  async getClientDetailsBeneficiary(
+    tenantId: string,
+    user: UserSessionPayload,
+    maid: string,
+  ): Promise<ClientDetailsBeneficiaryResponse> {
+    const trimmedTenantId = tenantId.trim();
+    const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
+    const apiKey = process.env.LAWTON_DX_API_KEY || 'KAtWQBHV1096TuH8JTzLxdQvNqFxrUAOWJ3ElF9w1sIEqoyj8rCTeFtIRGflIQ6oi6eGIAWzPa5JE4nOwQElgZMUfQ4AtsxsZvBciHGKc5GWBmEMZ1ybZcigfZwvDf3C';
+    const dxUrl = tenantConfig.config?.dataexchange?.api || 'https://uat-lawton-dx.lawtonasia.com';
+
+    let beneficiaryData: Record<string, any> | null = null;
+
+    // 1. Fetch from Lawton DX API
+    try {
+      const res = await fetch(`${dxUrl.replace(/\/+$/, '')}/api/beneficiaryinfo/getDetail/${encodeURIComponent(maid)}`, {
+        headers: {
+          'X-API-Key': apiKey,
+          'Content-Type': 'application/json',
+        },
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json?.isSuccess && json.data) {
+          beneficiaryData = json.data;
+        }
+      }
+    } catch (apiErr: any) {
+      this.logger.warn(`Failed fetching beneficiary from DX API: ${apiErr.message}`, BrokerService.name, { maid });
+    }
+
+    // 2. Fallback to SQL data_table if API did not return data
+    const dbConfig = tenantConfig.config?.database;
+    if (!beneficiaryData && dbConfig) {
+      try {
+        const pool = await this.sqlServerService.getPool(dbConfig);
+        const row = await pool
+          .request()
+          .input('maid', maid)
+          .query(`SELECT TOP 1 * FROM Lawton.dbo.data_table WITH(NOLOCK) WHERE maid = @maid ORDER BY uploaded_on DESC`);
+        if (row.recordset?.length) {
+          beneficiaryData = row.recordset[0];
+        }
+      } catch (dbErr: any) {
+        this.logger.warn(`Failed fetching beneficiary fallback from DB: ${dbErr.message}`, BrokerService.name, { maid });
+      }
+    }
+
+    if (!beneficiaryData) {
+      return { isSuccess: false, message: 'Beneficiary not found' };
+    }
+
+    // 3. Resolve dependents / family members
+    const dependents: ClientDetailsMember[] = [];
+    if (dbConfig && beneficiaryData.policy_no && beneficiaryData.staff_id_no) {
+      try {
+        const pool = await this.sqlServerService.getPool(dbConfig);
+        const depRows = await pool
+          .request()
+          .input('polNo', beneficiaryData.policy_no)
+          .input('staffId', beneficiaryData.staff_id_no)
+          .input('currentMaid', maid)
+          .query(`
+            SELECT TOP 20 *
+            FROM Lawton.dbo.data_table WITH(NOLOCK)
+            WHERE policy_no = @polNo 
+              AND staff_id_no = @staffId 
+              AND maid != @currentMaid
+            ORDER BY id ASC
+          `);
+
+        if (depRows.recordset?.length) {
+          const fmtDate = (d: any) => {
+            if (!d) return '-';
+            try {
+              const dt = new Date(d);
+              return isNaN(dt.getTime())
+                ? String(d)
+                : dt.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-');
+            } catch {
+              return String(d);
+            }
+          };
+
+          for (const r of depRows.recordset) {
+            const activeBool = r.is_active === true || r.is_active === 1 || String(r.policy_status).toLowerCase() === 'active';
+            dependents.push({
+              maid: String(r.maid || r.id),
+              name: [r.first_name, r.middle_name, r.last_name].filter(Boolean).join(' ').trim() || 'Dependent',
+              firstName: r.first_name || '',
+              middleName: r.middle_name || '',
+              lastName: r.last_name || '',
+              emailId: r.email || '',
+              staffId: r.staff_id_no || r.emp_id || '',
+              pihNumber: r.pih_member_no || '',
+              relation: r.relationship || r.relation || 'Dependent',
+              policyStatus: r.policy_status || (activeBool ? 'Active' : 'Inactive'),
+              inceptionDate: fmtDate(r.original_entry_date || r.effective_date),
+              startDate: fmtDate(r.effective_date),
+              endDate: fmtDate(r.expiry_date),
+              memberStatus: activeBool ? 'Active' : 'Inactive',
+              isBenefActive: activeBool,
+              planType: r.program_plan || '',
+              polNo: r.policy_no || '',
+              corpName: r.company_name || '',
+            });
+          }
+        }
+      } catch (depErr: any) {
+        this.logger.warn(`Failed fetching dependents from DB: ${depErr.message}`, BrokerService.name, { maid });
+      }
+    }
+
+    return {
+      isSuccess: true,
+      data: beneficiaryData,
+      dependents,
+    };
+  }
+
+  /**
+   * Updates beneficiary information via Lawton DX service and synchronizes local tables.
+   */
+  async updateClientDetailsBeneficiary(
+    tenantId: string,
+    user: UserSessionPayload,
+    maid: string,
+    dto: UpdateBeneficiaryDto,
+  ): Promise<{ isSuccess: boolean; message: string }> {
+    const trimmedTenantId = tenantId.trim();
+    const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
+    const apiKey = process.env.LAWTON_DX_API_KEY || 'KAtWQBHV1096TuH8JTzLxdQvNqFxrUAOWJ3ElF9w1sIEqoyj8rCTeFtIRGflIQ6oi6eGIAWzPa5JE4nOwQElgZMUfQ4AtsxsZvBciHGKc5GWBmEMZ1ybZcigfZwvDf3C';
+    const dxUrl = tenantConfig.config?.dataexchange?.api || 'https://uat-lawton-dx.lawtonasia.com';
+
+    const parseDateToISO = (val?: string) => {
+      if (!val?.trim()) return null;
+      try {
+        const d = new Date(val);
+        return isNaN(d.getTime()) ? null : d.toISOString();
+      } catch {
+        return null;
+      }
+    };
+
+    const payload = {
+      UserDetails: {
+        maid: String(maid),
+        uploaded_by: 'lawton_asia',
+        insurer_id_no: (dto.insurerNo || '').trim(),
+        pih_member_no: (dto.pihNumber || '').trim(),
+        first_name: (dto.firstName || '').trim(),
+        middle_name: (dto.middleName || '').trim(),
+        last_name: (dto.lastName || '').trim(),
+        id_passport_no: (dto.passportNo || '').trim(),
+        dob: parseDateToISO(dto.dob),
+        age: Number(dto.age) || 0,
+        gender: (dto.sex || '').trim(),
+        marital_status: (dto.maritalStatus || '').trim(),
+        relationship: (dto.relationshipCode || dto.relation || '').trim(),
+        nationality: (dto.nationality || '').trim(),
+        home_country: (dto.homeCountry || '').trim(),
+        sum_assured: Number(dto.sumInsured) || 0,
+        email: (dto.emailId || '').trim(),
+        mobile_number: (dto.mobileNumber || '').trim(),
+        coverage_area: (dto.areaCode || '').trim(),
+        physical_address: (dto.address || '').trim(),
+        effective_date: parseDateToISO(dto.inceptionDate),
+        expiry_date: parseDateToISO(dto.expiryDate),
+      },
+    };
+
+    try {
+      const res = await fetch(`${dxUrl.replace(/\/+$/, '')}/api/beneficiaryinfo/update`, {
+        method: 'POST',
+        headers: {
+          'X-API-Key': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const responseJson = await res.json().catch(() => null);
+
+      if (!res.ok || (responseJson && responseJson.isSuccess === false)) {
+        const errMsg = responseJson?.message || 'Unable to update beneficiary details.';
+        this.logger.warn(`Lawton DX update error: ${errMsg}`, BrokerService.name, { maid, status: res.status });
+        return { isSuccess: false, message: errMsg };
+      }
+
+      // Also sync directly to SQL Server data_table
+      const dbConfig = tenantConfig.config?.database;
+      if (dbConfig) {
+        try {
+          const pool = await this.sqlServerService.getPool(dbConfig);
+          await pool
+            .request()
+            .input('maid', maid)
+            .input('firstName', payload.UserDetails.first_name)
+            .input('middleName', payload.UserDetails.middle_name)
+            .input('lastName', payload.UserDetails.last_name)
+            .input('pihNumber', payload.UserDetails.pih_member_no)
+            .input('relationship', payload.UserDetails.relationship)
+            .input('email', payload.UserDetails.email)
+            .input('mobileNumber', payload.UserDetails.mobile_number)
+            .input('address', payload.UserDetails.physical_address)
+            .input('passportNo', payload.UserDetails.id_passport_no)
+            .input('maritalStatus', payload.UserDetails.marital_status)
+            .input('nationality', payload.UserDetails.nationality)
+            .input('homeCountry', payload.UserDetails.home_country)
+            .input('sumAssured', payload.UserDetails.sum_assured)
+            .input('areaCode', payload.UserDetails.coverage_area)
+            .query(`
+              UPDATE Lawton.dbo.data_table
+              SET 
+                first_name = @firstName,
+                middle_name = @middleName,
+                last_name = @lastName,
+                pih_member_no = @pihNumber,
+                relationship = @relationship,
+                email = @email,
+                mobile_number = @mobileNumber,
+                physical_address = @address,
+                id_passport_no = @passportNo,
+                marital_status = @maritalStatus,
+                nationality = @nationality,
+                home_country = @homeCountry,
+                sum_assured = @sumAssured,
+                coverage_area = @areaCode
+              WHERE maid = @maid
+            `);
+        } catch (dbUpdateErr: any) {
+          this.logger.warn(`Non-fatal DB update sync error: ${dbUpdateErr.message}`, BrokerService.name, { maid });
+        }
+      }
+
+      return {
+        isSuccess: true,
+        message: responseJson?.message || 'Beneficiary details updated successfully.',
+      };
+    } catch (err: any) {
+      this.logger.error(`Error updating beneficiary details: ${err.message}`, err.stack, BrokerService.name, { maid });
+      return { isSuccess: false, message: 'Failed to update beneficiary details. Please try again.' };
+    }
   }
 }

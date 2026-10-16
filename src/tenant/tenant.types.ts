@@ -81,6 +81,7 @@ export interface TenantInternalConfig {
   auth: TenantAuthConfig;
   services: TenantServicesConfig;
   claimApis: TenantClaimApisConfig;
+  dataexchange?: { api: string };
   database: TenantDatabaseConfig;
   memberConfigDb: TenantMemberConfigDb;
   email: TenantEmailConfig;
