@@ -45,7 +45,7 @@ export class BrokerService {
     private readonly bankApiService: BankApiService
   ) { }
 
-  async getBrokerData(tenantId: string, user: UserSessionPayload): Promise<DashboardResponse> {
+  async getBrokerData(tenantId: string, user: UserSessionPayload, host: string): Promise<DashboardResponse> {
     const trimmedTenantId = tenantId.trim();
     const brokerId = user.brokerId || DEFAULT_BROKER_ID;
     const isLawton = trimmedTenantId === LAWTON_TENANT_ID;
@@ -87,7 +87,7 @@ export class BrokerService {
 
       // Apply fallback resolution if no corporate IDs found or single test fallback ID
       if (corpIds.length === 0 || (corpIds.length === 1 && corpIds[0] === DEFAULT_FALLBACK_CORP_ID)) {
-        corpIds = await this.resolveFallbackCorpIds(trimmedTenantId, user, tenantConfig, isLawton);
+        corpIds = await this.resolveBrokerCorpIds(user, tenantConfig, host);
       }
 
       const isAdminBroker = Boolean(user.isAdminBroker);
@@ -161,23 +161,72 @@ export class BrokerService {
   /**
    * Resolves fallback corporate IDs when agent policy headers are empty or default.
    */
-  private async resolveFallbackCorpIds(
-    tenantId: string,
-    user: UserSessionPayload,
-    tenantConfig: TenantConfigTypes,
-    isLawton: boolean,
-  ): Promise<number[]> {
-    return this.claimApiService.resolveFallbackCorpIds(
-      tenantId,
-      user,
-      tenantConfig,
-      isLawton,
-    );
+  async resolveBrokerCorpIds(user: UserSessionPayload, tenantConfig: TenantConfigTypes, host: string,) {
+    let ids: number[] = [];
+    const brokerId = String(user?.brokerId || '');
+    if (brokerId) {
+      const resp = await this.claimApiService.searchPoliciesByAgent(brokerId, [tenantConfig.config.additionalConfigs.allowedTPAIds], host);
+      const headers: any[] = resp?.PolicyHeaders || resp?.policyHeaders || [];
+      ids = [...new Set(
+        headers
+          .map((p: any) => Number(p.CorporateId ?? p.corporateId ?? 0))
+          .filter((id: number) => id > 0)
+      )];
+    }
+
+    if (ids.length === 0 || (ids.length === 1 && ids[0] === 1041805)) {
+      // Lawton partner / broker in UAT manages these 10 corporates
+      if (
+        host.includes('partner') ||
+        host.includes('lawton') ||
+        host.includes('localhost') ||
+        !user?.brokerId ||
+        user?.brokerId === '120'
+      ) {
+        ids = [1422143, 1422123, 1422130, 1422104, 1422138, 1422145, 1422136, 1422147, 1422146, 1422144];
+      } else {
+        ids = await this.getAccessibleCorpIds(user,tenantConfig);
+      }
+    }
+    return ids;
+  }
+
+  private async getAccessibleCorpIds(user: UserSessionPayload,tenantConfig: TenantConfigTypes){
+    const baseUrl = tenantConfig.config?.claimApis?.v2;
+    const accessKey = tenantConfig.config?.claimApis?.v2Key || '';
+    const ids = new Set<number>();
+    const providerCorpId = Number(user?.providerCorpId || 0);
+  const groupCorpId = Number(user?.providerGroupCorpId || 0);
+if (providerCorpId > 0) ids.add(providerCorpId);
+
+  if (groupCorpId > 0) {
+    try {
+      const resp = await this.claimApiService.searchPoliciesByGroupCorp(groupCorpId, tenantConfig.tenantId, baseUrl, accessKey, false );
+      const policies: any[] = resp?.policyDetails || [];
+      for (const p of policies) {
+        const cid = Number(p.pol_CorporateId ?? p.CorporateId ?? p.corporateId ?? 0);
+        if (cid > 0) ids.add(cid);
+      }
+    } catch (err) {
+      this.logger.warn('Group-corp sub-corporate lookup failed — falling back to session corp ids');
+    }
+    // Legacy behaviour when the group itself resolves no sub-corporates:
+    // treat the group id as a corp id rather than leave the HR with nothing.
+    if (ids.size === 0) ids.add(groupCorpId);
+  }
+
+  if (ids.size === 0) ids.add(tenantConfig.config.corpId as number);
+
+  const result = [...ids];
+
+  return result;
+  
   }
 
   async getPolicyList(
     tenantId: string,
     user: UserSessionPayload,
+    host: string
   ) {
     const normalizedTenantId = tenantId.trim();
     const brokerId = user.brokerId || DEFAULT_BROKER_ID;
@@ -268,11 +317,10 @@ export class BrokerService {
         context,
       );
 
-      const corpIds = await this.resolveFallbackCorpIds(
-        normalizedTenantId,
+      const corpIds = await this.resolveBrokerCorpIds(
         user,
         tenantConfig,
-        isLawton,
+        host
       );
 
       const fallbackStartedAt = Date.now();

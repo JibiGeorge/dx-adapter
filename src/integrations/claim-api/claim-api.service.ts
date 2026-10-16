@@ -13,7 +13,7 @@ export class ClaimApiService {
 
   async searchPoliciesByAgent(
     brokerId: string | number,
-    allowedTPAIds: number[],
+    allowedTPAIds: string[] | number[],
     baseUrl: string,
   ): Promise<AgentPolicySearchResponse> {
     const cleanUrl = baseUrl.replace(/\/+$/, '');
@@ -140,21 +140,6 @@ export class ClaimApiService {
     tenantConfig: { config?: { claimApis?: { v2?: string; v2Key?: string } } },
     isLawton: boolean,
   ): Promise<number[]> {
-    const LAWTON_FALLBACK_CORP_IDS = [
-      1422143, 1422123, 1422130, 1422104, 1422138, 1422145, 1422136, 1422147, 1422146, 1422144,
-    ];
-    const DEFAULT_BROKER_ID = '120';
-    const DEFAULT_FALLBACK_CORP_ID = 1041805;
-
-    if (isLawton || String(user.brokerId) === DEFAULT_BROKER_ID) {
-      this.logger.debug(
-        `Using Lawton / default fallback corporate IDs`,
-        ClaimApiService.name,
-        { tenantId, brokerId: user.brokerId },
-      );
-      return [...LAWTON_FALLBACK_CORP_IDS];
-    }
-
     const groupCorpId = Number(user.providerGroupCorpId || 0);
     const resolvedIds = new Set<number>();
 
@@ -189,10 +174,6 @@ export class ClaimApiService {
       if (resolvedIds.size === 0) {
         resolvedIds.add(groupCorpId);
       }
-    }
-
-    if (resolvedIds.size === 0) {
-      resolvedIds.add(DEFAULT_FALLBACK_CORP_ID);
     }
 
     return Array.from(resolvedIds);
