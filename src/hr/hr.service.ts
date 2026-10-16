@@ -9,6 +9,7 @@ import { HRDashboardResponse, HRStatusResponse, SubCorpItem } from "./hr.types.j
 import { parseDotNetDate } from "../../utils/date-helper.js";
 import { GetCorpDto } from "./dto/corp.dto.js";
 import { BrokerService } from "../broker/broker.service.js";
+import { SqlServerService } from "../database/sql-server.service.js";
 
 function safeParseDotNetDate(value?: string | null): Date | null {
     if (!value) return null;
@@ -76,7 +77,8 @@ export class HRService {
         private readonly logger: LoggingService,
         private readonly claimService: ClaimApiService,
         private readonly tenantService: TenantService,
-        private readonly brokerService: BrokerService
+        private readonly brokerService: BrokerService,
+        private readonly sqlServerService: SqlServerService,
     ) { }
 
     async getHRData(tenantId: string, user: UserSessionPayload): Promise<HRDashboardResponse> {
@@ -932,6 +934,85 @@ export class HRService {
                 subCorporates: [],
                 corporates: [],
             };
+        }
+    }
+
+    async getPlanTypes(policyNo: string, tenantId: string) {
+        const startedAt = Date.now();
+        const trimmedTenantId = tenantId.trim();
+        const trimmedPolicyNo = (policyNo || '').trim();
+
+        this.logger.log('Fetching plan types', HRService.name, {
+            tenantId: trimmedTenantId,
+            policyNo: trimmedPolicyNo,
+        });
+
+        const tenantConfig: TenantConfigTypes =
+            await this.tenantService.getFullTenantById(trimmedTenantId);
+
+        if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${trimmedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: trimmedTenantId, policyNo: trimmedPolicyNo },
+            );
+            throw new InternalServerErrorException('Tenant not found');
+        }
+
+        const dbConfig = tenantConfig.config?.database;
+
+        if (!dbConfig) {
+            this.logger.warn(
+                `Database configuration not found for tenant: ${trimmedTenantId}`,
+                HRService.name,
+                { tenantId: trimmedTenantId, policyNo: trimmedPolicyNo },
+            );
+            return { success: true, plans: [] };
+        }
+
+        try {
+            const pool = await this.sqlServerService.getPool(dbConfig);
+
+            const result = await pool
+                .request()
+                .input('PolNo', trimmedPolicyNo)
+                .query(
+                    `SELECT PlanName, PolNo, PLANPOLID 
+                     FROM Lawton.dbo.vwPolicyPlanType WITH(NOLOCK) 
+                     WHERE PolNo = @PolNo`,
+                );
+
+            const plans = (result.recordset || []).map((row: any) => ({
+                PolNo: row.PolNo != null ? String(row.PolNo).trim() : trimmedPolicyNo,
+                PlanName: row.PlanName != null ? String(row.PlanName).trim() : '',
+                PlanPolId: Number(row.PLANPOLID) || 0,
+            }));
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.log(
+                `Successfully fetched ${plans.length} plan types for policy: ${trimmedPolicyNo} in ${durationMs}ms`,
+                HRService.name,
+                {
+                    tenantId: trimmedTenantId,
+                    policyNo: trimmedPolicyNo,
+                    plansCount: plans.length,
+                    durationMs,
+                },
+            );
+
+            return { success: true, plans };
+
+        } catch (dbErr) {
+            const err = dbErr instanceof Error ? dbErr : new Error(String(dbErr));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error while fetching plan types for policy ${trimmedPolicyNo} after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: trimmedTenantId, policyNo: trimmedPolicyNo, durationMs },
+            );
+            return { success: false, error: 'Failed to fetch plan types', plans: [] };
         }
     }
 }

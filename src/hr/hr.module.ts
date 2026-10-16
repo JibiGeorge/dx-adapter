@@ -5,9 +5,10 @@ import { AuthModule } from "../auth/auth.module.js";
 import { ClaimApiModule } from "../integrations/claim-api/claim-api.module.js";
 import { TenantModule } from "../tenant/tenant.module.js";
 import { BrokerModule } from "../broker/broker.module.js";
+import { DatabaseModule } from "../database/database.module.js";
 
 @Module({
-  imports: [AuthModule, ClaimApiModule, TenantModule, BrokerModule],
+  imports: [AuthModule, ClaimApiModule, TenantModule, BrokerModule, DatabaseModule],
   controllers: [HRController],
   providers: [HRService],
   exports: [HRService],

@@ -78,4 +78,21 @@ export class HRController {
         const requestedRole = (roleHeader || altRoleHeader || 'hr').trim();
         return this.hrService.getPolicyDetailsMWC(tenantId, user, requestedRole, host);
     }
+
+    @Get('plan-types')
+    async getPlanTypes(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Query('policyNo') policyNo?: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        if (!policyNo) {
+            throw new BadRequestException('Policy number is required');
+        }
+
+        return this.hrService.getPlanTypes(policyNo, tenantId);
+    }
 }
