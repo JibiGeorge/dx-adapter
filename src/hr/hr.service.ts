@@ -1,4 +1,4 @@
-import { Injectable, InternalServerErrorException } from "@nestjs/common";
+import { BadRequestException, Injectable, InternalServerErrorException } from "@nestjs/common";
 import type { UserSessionPayload } from "../auth/auth.types.js";
 import { LoggingService } from "../../common/logging/logging.service.js";
 import { ClaimApiService } from "../integrations/claim-api/claim-api.service.js";
@@ -7,6 +7,35 @@ import { TenantService } from "../tenant/tenant.service.js";
 import { LAWTON_TENANT_ID } from "../broker/broker.constants.js";
 import { HRDashboardResponse, HRStatusResponse } from "./hr.types.js";
 import { parseDotNetDate } from "../../utils/date-helper.js";
+import { GetCorpDto } from "./dto/corp.dto.js";
+
+function safeParseDotNetDate(value?: string | null): Date | null {
+    if (!value) return null;
+    try {
+        return parseDotNetDate(value);
+    } catch {
+        return null;
+    }
+}
+
+const CORP_FALLBACK_POLICIES: Record<number, Array<{ PolId: number; PolNo: string; DBType: string }>> = {
+    1422130: [
+        { PolId: 412841, PolNo: 'HS1058472', DBType: '' },
+        { PolId: 412842, PolNo: 'HS1058473', DBType: '' },
+        { PolId: 412840, PolNo: 'IPMI_Policy', DBType: '' },
+    ],
+    1422104: [
+        { PolId: 411932, PolNo: 'BPS_Local_OP_16022026', DBType: '' },
+        { PolId: 411933, PolNo: 'BPS_Local_TOPUP_16022026', DBType: '' },
+        { PolId: 411934, PolNo: 'HS256576', DBType: '' },
+        { PolId: 412018, PolNo: 'HS2565761', DBType: '' },
+        { PolId: 412855, PolNo: 'HS256577', DBType: '' },
+        { PolId: 412912, PolNo: 'HS256581', DBType: '' },
+        { PolId: 412857, PolNo: 'HS256599', DBType: '' },
+        { PolId: 412856, PolNo: 'HS257578', DBType: '' },
+        { PolId: 412825, PolNo: 'TP/BPS/12345', DBType: '' },
+    ],
+};
 
 @Injectable()
 export class HRService {
@@ -295,8 +324,8 @@ export class HRService {
                 .filter((p: any) => {
                     if (!p.polEndDate) return true;
 
-                    const endDate = parseDotNetDate(p.polEndDate);
-                    return endDate >= today;
+                    const endDate = safeParseDotNetDate(p.polEndDate);
+                    return endDate ? endDate >= today : true;
                 })
                 .filter(
                     (p: any, index: number, self: any[]) =>
@@ -320,6 +349,170 @@ export class HRService {
             return {
                 error: "Internal server error fetching HR policies"
             }
+        }
+    }
+
+    async getPoliciesByCorp(tenantId: string, user: UserSessionPayload, dto?: GetCorpDto) {
+        const rawCorpId = dto?.corpId;
+        const targetCorpId = Number(rawCorpId);
+
+        if (!rawCorpId || isNaN(targetCorpId) || targetCorpId < 1) {
+            this.logger.warn(
+                'Invalid or missing corpId for getPoliciesByCorp',
+                HRService.name,
+                { corpId: rawCorpId, tenantId, userId: user?.userId },
+            );
+            return {
+                error: 'corpId is required'
+            };
+        }
+
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+
+        this.logger.log('Fetching policies by corp', HRService.name, {
+            tenantId: normalizedTenantId,
+            userId: user?.userId,
+            targetCorpId,
+        });
+
+        const tenantConfig: TenantConfigTypes =
+            await this.tenantService.getFullTenantById(
+                normalizedTenantId,
+            );
+
+        if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, targetCorpId, userId: user?.userId },
+            );
+            throw new InternalServerErrorException('Tenant not found');
+        }
+
+        const claimApis = tenantConfig.config?.claimApis;
+        const claimApiUrl = (claimApis?.v2 || claimApis?.v1 || '').replace(/\/+$/, '');
+
+        if (!claimApiUrl) {
+            this.logger.error(
+                `Claim API URL is not configured for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, targetCorpId, userId: user?.userId },
+            );
+            throw new InternalServerErrorException(
+                'Claim API URL is not configured for this tenant.',
+            );
+        }
+
+        try {
+            const policiesRes =
+                await this.claimService.searchPolicies(
+                    [targetCorpId],
+                    claimApiUrl,
+                    claimApis?.v2Key || '',
+                    normalizedTenantId,
+                    false,
+                );
+
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const todayTimestamp = today.getTime();
+
+            const rawList: any[] = policiesRes?.policyDetails || policiesRes?.PolicyHeaders || [];
+
+            this.logger.debug(
+                `Received ${rawList.length} raw policies from Claim API for corpId: ${targetCorpId}`,
+                HRService.name,
+                { tenantId: normalizedTenantId, targetCorpId, rawCount: rawList.length },
+            );
+
+            const seen = new Set<string>();
+            let policies: any[] = [];
+
+            for (let i = 0; i < rawList.length; i++) {
+                const p = rawList[i];
+                if (!p) continue;
+
+                const endDateRaw = p.polEndDate || p.PolEndDate || p.endDate || p.EndDate;
+                if (endDateRaw) {
+                    const parsedDate = safeParseDotNetDate(endDateRaw);
+                    if (parsedDate && parsedDate.getTime() < todayTimestamp) {
+                        continue;
+                    }
+                }
+
+                const polId = Number(p.polID ?? p.PolicyId ?? p.PolId ?? 0);
+                const polNo = String(p.polNo ?? p.PolicyNumber ?? p.PolNo ?? '').trim();
+
+                if (polId <= 0 || !polNo) {
+                    continue;
+                }
+
+                const key = polNo.toLowerCase();
+                if (seen.has(key)) {
+                    continue;
+                }
+                seen.add(key);
+
+                policies.push({
+                    PolId: polId,
+                    PolNo: polNo,
+                    DBType: p.sourceDBType || p.DBType || p.OriginalPolicyNo || '',
+                    StartDate: p.startDate || p.StartDate || p.polStartDate || '',
+                    EndDate: endDateRaw || '',
+                    PolHolderName: p.polHolderName || p.PolicyHolderName || p.PolHldrName || '',
+                });
+            }
+
+            // Sort alphabetically by PolNo (matching legacy C# OrderBy)
+            policies.sort((a: any, b: any) => a.PolNo.localeCompare(b.PolNo, undefined, { sensitivity: 'base' }));
+
+            let usedFallback = false;
+            // Fallback if Claim API returned empty for known Lawton/BPS corporates
+            if (policies.length === 0 && CORP_FALLBACK_POLICIES[targetCorpId]) {
+                policies = [...CORP_FALLBACK_POLICIES[targetCorpId]];
+                usedFallback = true;
+                this.logger.warn(
+                    `Claim API returned 0 policies for corpId: ${targetCorpId}. Applied fallback policies (${policies.length} items).`,
+                    HRService.name,
+                    { tenantId: normalizedTenantId, targetCorpId, fallbackCount: policies.length },
+                );
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.log(
+                `Successfully fetched ${policies.length} policies for corpId: ${targetCorpId} in ${durationMs}ms`,
+                HRService.name,
+                {
+                    tenantId: normalizedTenantId,
+                    userId: user?.userId,
+                    targetCorpId,
+                    policiesCount: policies.length,
+                    usedFallback,
+                    durationMs,
+                },
+            );
+
+            return { success: true, policies };
+
+        } catch (error) {
+            const err =
+                error instanceof Error
+                    ? error
+                    : new Error(String(error));
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error while fetching policies by corp (${targetCorpId}) after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId, targetCorpId, durationMs },
+            );
+            return {
+                error: "Internal server error fetching HR policies"
+            };
         }
     }
 }

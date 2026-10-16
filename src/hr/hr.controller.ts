@@ -1,10 +1,11 @@
-import { BadRequestException, Controller, Get, Headers, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Headers, Query, UseGuards } from "@nestjs/common";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard.js";
 import { HRRoleGuard } from "../../common/guards/hr-role.guard.js";
 import { HRService } from "./hr.service.js";
 import { CurrentUser } from "../../common/decorators/current-user.decorator.js";
 import type { UserSessionPayload } from "../auth/auth.types.js";
 import { HRDashboardResponse, HRStatusResponse } from "./hr.types.js";
+import { GetCorpDto } from "./dto/corp.dto.js";
 
 @Controller('hr')
 @UseGuards(JwtAuthGuard, HRRoleGuard)
@@ -19,7 +20,7 @@ export class HRController {
         if (!tenantId?.trim()) {
             throw new BadRequestException('x-tenant-id header is required');
         }
-        
+
         return this.hrService.getHRData(tenantId, user);
     }
 
@@ -43,9 +44,23 @@ export class HRController {
         @Headers('x-tenant-id') tenantId: string,
         @CurrentUser() user: UserSessionPayload,
     ): Promise<any> {
-        if(!tenantId.trim()){
+        if (!tenantId?.trim()) {
             throw new BadRequestException('x-tenant-id header is required');
         }
         return this.hrService.getPolicies(tenantId, user);
+    }
+
+    @Get('policies-by-corp')
+    async getPoliciesByCorp(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Query() queryDto?: GetCorpDto,
+        @Body() bodyDto?: GetCorpDto,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+        const effectiveDto = queryDto?.corpId ? queryDto : bodyDto;
+        return this.hrService.getPoliciesByCorp(tenantId, user, effectiveDto);
     }
 }
