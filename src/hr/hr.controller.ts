@@ -63,4 +63,19 @@ export class HRController {
         const effectiveDto = queryDto?.corpId ? queryDto : bodyDto;
         return this.hrService.getPoliciesByCorp(tenantId, user, effectiveDto);
     }
+
+    @Get('policy-details-mwc')
+    async getPolicyDetailsMWC(
+        @Headers('host') host: string,
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Headers('x-role') roleHeader?: string,
+        @Headers('role') altRoleHeader?: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+        const requestedRole = (roleHeader || altRoleHeader || 'hr').trim();
+        return this.hrService.getPolicyDetailsMWC(tenantId, user, requestedRole,host);
+    }
 }

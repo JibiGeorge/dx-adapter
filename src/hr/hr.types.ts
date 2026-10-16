@@ -52,3 +52,11 @@ export interface HRRecentClaim {
   claimAmount: number;
   status: string;
 }
+export interface SubCorpItem {
+  Value: string;
+  Text: string;
+  value: string;
+  text: string;
+  corpId: number;
+  corpName: string;
+}
