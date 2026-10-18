@@ -281,4 +281,17 @@ export class HRController {
 
         return this.hrService.getEcardCorporates(tenantId, user, host);
     }
+
+    @Get('ecard-details')
+    async getEcardDetails(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Query('polId') polId?: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getEcardDetails(tenantId, user, polId);
+    }
 }

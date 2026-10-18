@@ -2713,4 +2713,180 @@ export class HRService {
             return { success: false, error: 'Internal server error fetching ecard corporates' };
         }
     }
+
+    async getEcardDetails(tenantId: string, user: UserSessionPayload, polId?: string) {
+        const startedAt = Date.now();
+        const filterPolId = polId ? Number(polId) : 0;
+        const sessionMaid = Number(user?.maid || 0);
+        const sessionUserId = Number(user?.userId || 0);
+
+        if (!sessionMaid) {
+            return { success: false, error: 'No MAID found in session' };
+        }
+
+        const normalizedTenantId = String(tenantId || '').trim();
+        const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(normalizedTenantId);
+
+        if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            throw new InternalServerErrorException('Tenant not found');
+        }
+
+        this.logger.debug('Fetching ecard details', HRService.name, {
+            tenantId: normalizedTenantId,
+            sessionMaid,
+            sessionUserId,
+            filterPolId,
+        });
+
+        try {
+            // Step 1: BeneficiarySearch by MAID
+            const v2Url = tenantConfig.config?.claimApis?.v2;
+            const v2Key = tenantConfig.config?.claimApis?.v2Key;
+
+            const payload: any = {
+                MAID: sessionMaid,
+                Range: 100,
+                StartIndex: 0,
+            };
+            if (sessionUserId > 0) {
+                payload.BenefUserId = sessionUserId;
+            }
+
+            const benefResponse = await this.claimService.searchBeneficiaries(
+                payload,
+                v2Url,
+                v2Key,
+                normalizedTenantId,
+                false,
+            );
+
+            const benefs: any[] =
+                benefResponse?.BeneficiaryDetails ||
+                (benefResponse as any)?.beneficiaryDetails ||
+                [];
+
+            let candidates = filterPolId > 0 ? benefs.filter((b: any) => Number(b.PolID || b.polId || 0) === filterPolId) : benefs;
+            if (!candidates.length) candidates = benefs;
+
+            const selfBenef =
+                candidates.find((b: any) =>
+                    String(b.Relation || b.relation || b.benefRelName || '').toLowerCase().includes('self'),
+                ) || candidates[0];
+
+            if (!selfBenef) {
+                return { success: false, message: 'No beneficiary found for this employee' };
+            }
+
+            const selfPolId = Number(selfBenef.PolID || selfBenef.polId || filterPolId || 0);
+            let insurerId: number = Number(selfBenef.PolInsCompID || selfBenef.polInsCompID || selfBenef.insurerid || 0);
+            const empCode: string = String(
+                selfBenef.PriBenefEmpCode ||
+                selfBenef.priBenefEmpCode ||
+                selfBenef.primaryBenefDetails?.priBenefEmpCode ||
+                (user as any)?.empCode ||
+                '',
+            ).trim();
+
+            // Step 2: FetchMemberPolicyDeatils for reliable insurerId
+            if (selfPolId > 0 && empCode) {
+                try {
+                    const memberPolicyRes = await this.claimService.fetchMemberPolicyDetails(
+                        tenantConfig.config?.claimApis?.v3,
+                        {
+                            masterPolicyId: selfPolId,
+                            employeeCode: empCode,
+                            dbType: 'MA',
+                        },
+                        v2Key,
+                        normalizedTenantId,
+                    );
+
+                    const memberDetails = memberPolicyRes?.memberPolicyDetails || memberPolicyRes?.MemberPolicyDetails || [];
+                    const detail = memberDetails[0];
+                    if (detail?.insurerid) {
+                        insurerId = Number(detail.insurerid);
+                    }
+                } catch (err) {
+                    const error = err instanceof Error ? err : new Error(String(err));
+                    this.logger.warn(
+                        `fetchMemberPolicyDetails failed for polId ${selfPolId}, using BeneficiarySearch insurerId: ${error.message}`,
+                        HRService.name,
+                    );
+                }
+            }
+
+            // Step 3: FetchPolicyDetails config tags decide availability (ShowECardForHR / ShowCOIForHR)
+            const isHrRole = !user?.activePortal || user.activePortal === 'hr';
+            const ecardTag = isHrRole ? 'ShowECardForHR' : 'ShowECardForBroker';
+            const coiTag = isHrRole ? 'ShowCOIForHR' : 'ShowCOIForBroker';
+
+            let ecardAllowed = false;
+            let coiAllowed = false;
+
+            if (selfPolId > 0) {
+                try {
+                    const planDetails = await this.claimService.fetchPolicyDetails(
+                        tenantConfig.config?.claimApis?.v3,
+                        { policyId: selfPolId },
+                        v2Key,
+                        normalizedTenantId,
+                    );
+
+                    ecardAllowed = this.hasPolicyConfigTag(
+                        planDetails?.eCardConfig || planDetails?.extraDetails?.eCardConfig,
+                        ecardTag,
+                    );
+                    coiAllowed = this.hasPolicyConfigTag(
+                        planDetails?.coiConfig || planDetails?.extraDetails?.coiConfig,
+                        coiTag,
+                    );
+                } catch (err) {
+                    const error = err instanceof Error ? err : new Error(String(err));
+                    this.logger.warn(
+                        `fetchPolicyDetails failed for polId ${selfPolId} in getEcardDetails: ${error.message}`,
+                        HRService.name,
+                    );
+                }
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(`Retrieved ecard details in ${durationMs}ms`, HRService.name, {
+                maid: selfBenef.MediAssistID || selfBenef.mediAssistID || sessionMaid,
+                polId: selfPolId,
+                ecardAllowed,
+                coiAllowed,
+            });
+
+            return {
+                success: true,
+                ecard: {
+                    maid: selfBenef.MediAssistID || selfBenef.mediAssistID || sessionMaid,
+                    polId: selfPolId,
+                    benefPriId: selfBenef.BenefPriID || selfBenef.benefPriID || 0,
+                    benefUserId: selfBenef.BenefUserID || selfBenef.benefUserID || sessionUserId,
+                    insurerId,
+                    name: selfBenef.Name || selfBenef.name || selfBenef.benefName || '',
+                    polSubType: selfBenef.PolSubType || selfBenef.polSubType || 0,
+                    ecardAllowed,
+                    coiAllowed,
+                },
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching ecard details after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, sessionMaid, polId },
+            );
+            return { success: false, error: 'Internal server error fetching ecard details' };
+        }
+    }
 }
