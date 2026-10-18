@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, Res, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
+import { All, BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, Res, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard.js";
@@ -691,5 +691,36 @@ export class HRController {
 
         const corpIdOverride = Number(corpId || 0);
         return this.hrService.getFileUploads(tenantId, user, corpIdOverride);
+    }
+
+    @All(['download-uploaded-file', 'DownloadUploadedFile'])
+    async downloadUploadedFile(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Query('filename') queryFilename: string,
+        @Body('filename') bodyFilename: string,
+        @Res() res: Response,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const filename = queryFilename || bodyFilename || '';
+        if (!filename) {
+            return res.status(400).json({ error: 'filename is required' });
+        }
+
+        const result = await this.hrService.downloadUploadedFile(tenantId, user, filename);
+
+        if (!result.success) {
+            return res.status(result.status || 500).json({ error: result.error });
+        }
+
+        res.set({
+            'Content-Type': result.contentType,
+            'Content-Disposition': result.contentDisposition,
+        });
+
+        return res.status(200).send(result.buffer);
     }
 }

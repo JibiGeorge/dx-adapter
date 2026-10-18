@@ -510,4 +510,62 @@ export class DXApiService {
             throw err;
         }
     }
+
+    async downloadUploadedFile(
+        baseUrl: string,
+        apiKey: string,
+        payload: { filename: string; ref_file: string; role: string },
+    ): Promise<{ buffer: Buffer; contentType: string; contentDisposition: string }> {
+        if (!baseUrl) {
+            this.logger.error('Enrollment API base URL is not configured', undefined, DXApiService.name);
+            throw new Error('Enrollment API URL is not configured.');
+        }
+
+        const cleanUrl = baseUrl.replace(/\/+$/, '');
+        const endpoint = `${cleanUrl}/api/broker/enrollments/download`;
+
+        this.logger.debug('Downloading uploaded file from Enrollment API', DXApiService.name, {
+            endpoint,
+            filename: payload.filename,
+            role: payload.role,
+        });
+
+        try {
+            const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'X-API-Key': apiKey,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            });
+
+            if (!res.ok) {
+                const errText = await res.text();
+                this.logger.error(`Enrollment download error: HTTP ${res.status} - ${errText}`, DXApiService.name);
+                throw new Error(`Could not download file: ${errText}`);
+            }
+
+            const contentType =
+                res.headers.get('content-type') ||
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+            const contentDisposition =
+                res.headers.get('content-disposition') ||
+                `attachment; filename="${payload.filename}"`;
+
+            const arrayBuffer = await res.arrayBuffer();
+            const buffer = Buffer.from(arrayBuffer);
+
+            return { buffer, contentType, contentDisposition };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+                `Error downloading uploaded file: ${err.message}`,
+                err.stack,
+                DXApiService.name,
+                { endpoint, filename: payload.filename },
+            );
+            throw err;
+        }
+    }
 }

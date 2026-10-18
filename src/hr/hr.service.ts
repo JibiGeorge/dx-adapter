@@ -5639,4 +5639,60 @@ export class HRService {
             return { error: 'Internal server error', status: 500 };
         }
     }
+
+    async downloadUploadedFile(
+        tenantId: string,
+        user: UserSessionPayload,
+        filename: string,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        if (!filename?.trim()) {
+            return { error: 'filename is required', status: 400 };
+        }
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const enrollmentApiUrl = tenantConfig?.config?.dataexchange?.api || '';
+            const enrollmentApiKey = tenantConfig?.config?.dataexchange?.key || '';
+
+            if (!enrollmentApiUrl) {
+                this.logger.error('Enrollment API URL not configured', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { error: 'Enrollment API URL not configured', status: 500 };
+            }
+
+            const role = (user as any)?.activePortal === 'broker' ? 'broker' : 'hr';
+            const fileData = await this.dxApiService.downloadUploadedFile(
+                enrollmentApiUrl,
+                enrollmentApiKey,
+                {
+                    filename: filename.trim(),
+                    ref_file: filename.trim(),
+                    role,
+                },
+            );
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Uploaded file ${filename} downloaded in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, filename, role },
+            );
+
+            return { success: true, ...fileData };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error downloading uploaded file after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, filename },
+            );
+            return { error: 'Could not download file', status: 500 };
+        }
+    }
 }
