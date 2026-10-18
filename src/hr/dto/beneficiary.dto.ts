@@ -1,0 +1,31 @@
+export class UpdateBeneficiaryDetailsDto {
+    maid?: number | string;
+    firstName?: string;
+    lastName?: string;
+    pihNumber?: string;
+    relation?: string;
+    relationshipCode?: string;
+    emailId?: string;
+    email?: string;
+    mobileNumber?: string;
+    homeCountry?: string;
+    home_country?: string;
+    insurerNo?: string;
+    idType?: string;
+    passportNo?: string;
+    dob?: string;
+    age?: number | string;
+    sex?: string;
+    gender?: string;
+    maritalStatus?: string;
+    nationality?: string;
+    sumInsured?: number | string;
+    areaCode?: string;
+    coverageArea?: string;
+    address?: string;
+    physicalAddress?: string;
+    inceptionDate?: string;
+    expiryDate?: string;
+    userDetails?: any;
+    [key: string]: any;
+}

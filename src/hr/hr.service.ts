@@ -8,6 +8,7 @@ import { LAWTON_TENANT_ID } from "../broker/broker.constants.js";
 import { HRDashboardResponse, HRStatusResponse, SubCorpItem } from "./hr.types.js";
 import { formatDateDDMMYYYY, formatDateString, parseDotNetDate } from "../../utils/date-helper.js";
 import { GetCorpDto } from "./dto/corp.dto.js";
+import { UpdateBeneficiaryDetailsDto } from "./dto/beneficiary.dto.js";
 import { BrokerService } from "../broker/broker.service.js";
 import { SqlServerService } from "../database/sql-server.service.js";
 import { DXApiService } from "../integrations/dx-api/dx-api.service.js";
@@ -1638,7 +1639,10 @@ export class HRService {
                 maid: trimmedMaid,
             });
 
-            return response;
+            return {
+                success: true,
+                data: response.data ?? response,
+            };
         } catch (error) {
             const err = error instanceof Error ? error : new Error(String(error));
             const durationMs = Date.now() - startedAt;
@@ -1649,6 +1653,204 @@ export class HRService {
                 { tenantId: normalizedTenantId, maid: trimmedMaid },
             );
             return { success: false, message: 'Unable to load beneficiary details.' };
+        }
+    }
+
+    async updateBeneficiaryDetails(
+        tenantId: string,
+        user: UserSessionPayload,
+        body: UpdateBeneficiaryDetailsDto,
+    ) {
+        const startedAt = Date.now();
+        const payload = body || {};
+        const maid = Number(payload.maid || payload.userDetails?.maid || 0);
+        if (!maid) {
+            return { success: false, message: 'Invalid member.' };
+        }
+
+        const firstName = String(payload.firstName || payload.userDetails?.first_name || '').trim();
+        const lastName = String(payload.lastName || payload.userDetails?.last_name || '').trim();
+        const pihNumber = String(payload.pihNumber || payload.userDetails?.pih_member_no || '').trim();
+        const relation = String(payload.relation || payload.relationshipCode || payload.userDetails?.relationship || '').trim();
+        const email = String(payload.emailId || payload.email || payload.userDetails?.email || '').trim();
+        const mobileNumber = String(payload.mobileNumber || payload.userDetails?.mobile_number || '').trim();
+
+        if (!firstName || !lastName) {
+            return { success: false, message: 'First Name and Last Name are required.' };
+        }
+        if (!pihNumber) {
+            return { success: false, message: 'PIH Member Id is required.' };
+        }
+        if (!relation) {
+            return { success: false, message: 'Relationship is required.' };
+        }
+        if (mobileNumber && mobileNumber.length > 20) {
+            return { success: false, message: 'Mobile Number cannot be longer than 20 characters.' };
+        }
+        if (email) {
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(email)) {
+                return { success: false, message: 'Invalid email address.' };
+            }
+        }
+
+        const parseDateToIso = (val: any): string | null => {
+            if (!val) return null;
+            try {
+                const s = String(val).trim();
+                const m = s.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
+                if (m) {
+                    const months: Record<string, string> = {
+                        jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+                        jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12'
+                    };
+                    const monthNum = months[m[2].toLowerCase()];
+                    if (monthNum) {
+                        const dayNum = m[1].padStart(2, '0');
+                        return `${m[3]}-${monthNum}-${dayNum}`;
+                    }
+                }
+                const d = new Date(val);
+                if (!isNaN(d.getTime())) return d.toISOString().split('T')[0];
+            } catch { }
+            return null;
+        };
+
+        const requestedHomeCountry = String(
+            payload.homeCountry || payload.home_country || payload.userDetails?.home_country || ''
+        ).trim();
+
+        const userDetails = {
+            maid,
+            uploaded_by: 'lawton_asia',
+            insurer_id_no: String(payload.insurerNo || payload.userDetails?.insurer_id_no || '').trim(),
+            pih_member_no: pihNumber,
+            first_name: firstName,
+            last_name: lastName,
+            id_type: String(payload.idType || payload.userDetails?.id_type || '').trim(),
+            id_passport_no: String(payload.passportNo || payload.userDetails?.id_passport_no || '').trim(),
+            dob: parseDateToIso(payload.dob || payload.userDetails?.dob),
+            age: Number(payload.age || payload.userDetails?.age || 0),
+            gender: String(payload.sex || payload.gender || payload.userDetails?.gender || '').trim(),
+            marital_status: String(payload.maritalStatus || payload.userDetails?.marital_status || '').trim(),
+            relationship: String(payload.relationshipCode || payload.relation || payload.userDetails?.relationship || '').trim(),
+            nationality: String(payload.nationality || payload.userDetails?.nationality || '').trim(),
+            home_country: requestedHomeCountry,
+            homeCountry: requestedHomeCountry,
+            country: requestedHomeCountry,
+            sum_assured: Number(payload.sumInsured || payload.userDetails?.sum_assured || 0),
+            email: email,
+            mobile_number: mobileNumber,
+            coverage_area: String(payload.areaCode || payload.coverageArea || payload.userDetails?.coverage_area || '').trim(),
+            physical_address: String(payload.address || payload.physicalAddress || payload.userDetails?.physical_address || '').trim(),
+            effective_date: parseDateToIso(payload.inceptionDate || payload.userDetails?.effective_date),
+            expiry_date: parseDateToIso(payload.expiryDate || payload.userDetails?.expiry_date),
+        };
+
+        const normalizedTenantId = tenantId.trim();
+        const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(normalizedTenantId);
+
+        if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            throw new InternalServerErrorException('Tenant not found');
+        }
+
+        // Update HomeCountry in MSSQL tblmamemberpolicy if configured and requested
+        const dbConfig = tenantConfig.config?.database;
+        if (dbConfig && requestedHomeCountry) {
+            try {
+                const pool = await this.sqlServerService.getPool(dbConfig);
+                const cRes = await pool.request()
+                    .input('cName', requestedHomeCountry)
+                    .query(`
+                        SELECT TOP 1 CountryId 
+                        FROM Lawton.dbo.tbl_Country_Master WITH (NOLOCK)
+                        WHERE LOWER(CountryName) = LOWER(@cName)
+                           OR LOWER(Nationality) = LOWER(@cName)
+                           OR LOWER(CountryCode) = LOWER(@cName)
+                    `);
+                const countryId = cRes.recordset[0]?.CountryId;
+                if (countryId) {
+                    await pool.request()
+                        .input('countryId', countryId)
+                        .input('maid', maid)
+                        .query(`
+                            UPDATE mp
+                            SET mp.HomeCountry = @countryId,
+                                mp.mpmodifiedDate = GETDATE()
+                            FROM Lawton.dbo.tblmamemberpolicy mp
+                            INNER JOIN Lawton.dbo.tblmabeneficiary b 
+                                ON (b.benefMemberPolicyId = mp.MemberPolId OR b.BenefPolID = mp.MemberPolId)
+                            WHERE b.BenefMediAssistID = @maid
+                        `);
+                    this.logger.log(
+                        `Updated HomeCountry to ${countryId} (${requestedHomeCountry}) in MSSQL for MAID ${maid}`,
+                        HRService.name,
+                        { tenantId: normalizedTenantId, maid, countryId },
+                    );
+                }
+            } catch (dbErr) {
+                const err = dbErr instanceof Error ? dbErr : new Error(String(dbErr));
+                this.logger.error(
+                    `Error updating HomeCountry in MSSQL: ${err.message}`,
+                    err.stack,
+                    HRService.name,
+                    { tenantId: normalizedTenantId, maid },
+                );
+            }
+        }
+
+        try {
+            const dxApiUrl = tenantConfig.config?.dataexchange?.api;
+            const dxApiKey = tenantConfig.config?.dataexchange?.key;
+
+            this.logger.debug('Updating beneficiary details via DXApiService', HRService.name, {
+                tenantId: normalizedTenantId,
+                maid,
+                userId: user?.userId,
+            });
+
+            const data = await this.dxApiService.updateBeneficiary(dxApiUrl, dxApiKey, userDetails);
+
+            const durationMs = Date.now() - startedAt;
+            if (data?.isSuccess || data?.success) {
+                this.logger.log(`Beneficiary updated successfully in ${durationMs}ms`, HRService.name, {
+                    tenantId: normalizedTenantId,
+                    maid,
+                });
+                return {
+                    success: true,
+                    message: data?.message || 'Beneficiary details updated successfully.',
+                };
+            }
+
+            this.logger.warn(`Beneficiary update returned failure: ${data?.message}`, HRService.name, {
+                tenantId: normalizedTenantId,
+                maid,
+                data,
+            });
+            return {
+                success: false,
+                message: data?.message || 'Unable to update beneficiary details.',
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error updating beneficiary details after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, maid },
+            );
+            return {
+                success: false,
+                message: 'Unable to update beneficiary details. Please try again.',
+            };
         }
     }
 }

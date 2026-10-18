@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Headers, Param, Query, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, UseGuards } from "@nestjs/common";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard.js";
 import { HRRoleGuard } from "../../common/guards/hr-role.guard.js";
 import { HRService } from "./hr.service.js";
@@ -6,6 +6,7 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator.js";
 import type { UserSessionPayload } from "../auth/auth.types.js";
 import { HRDashboardResponse, HRStatusResponse } from "./hr.types.js";
 import { GetCorpDto } from "./dto/corp.dto.js";
+import { UpdateBeneficiaryDetailsDto } from "./dto/beneficiary.dto.js";
 
 @Controller('hr')
 @UseGuards(JwtAuthGuard, HRRoleGuard)
@@ -185,5 +186,18 @@ export class HRController {
         }
 
         return this.hrService.getBeneficiaryDetail(tenantId, user, maid);
+    }
+
+    @Post('beneficiary-update')
+    async updateBeneficiaryDetails(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Body() body: UpdateBeneficiaryDetailsDto,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.updateBeneficiaryDetails(tenantId, user, body);
     }
 }
