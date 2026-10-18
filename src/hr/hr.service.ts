@@ -12,6 +12,7 @@ import { UpdateBeneficiaryDetailsDto } from "./dto/beneficiary.dto.js";
 import { BrokerService } from "../broker/broker.service.js";
 import { SqlServerService } from "../database/sql-server.service.js";
 import { DXApiService } from "../integrations/dx-api/dx-api.service.js";
+import { EcardApiService } from "../integrations/ecard-api/ecard-api.service.js";
 import { TENANTS } from "../../utils/tentant-helper.js";
 
 interface PolicyBeneficiariesParams {
@@ -94,6 +95,7 @@ export class HRService {
         private readonly brokerService: BrokerService,
         private readonly sqlServerService: SqlServerService,
         private readonly dxApiService: DXApiService,
+        private readonly ecardApiService: EcardApiService,
     ) { }
 
     async getHRData(tenantId: string, user: UserSessionPayload): Promise<HRDashboardResponse> {
@@ -2887,6 +2889,522 @@ export class HRService {
                 { tenantId: normalizedTenantId, sessionMaid, polId },
             );
             return { success: false, error: 'Internal server error fetching ecard details' };
+        }
+    }
+
+    private isPdfBuffer(bytes: any): boolean {
+        if (!bytes) return false;
+        try {
+            const buf = Buffer.isBuffer(bytes)
+                ? bytes
+                : Buffer.from(bytes, typeof bytes === 'string' ? 'base64' : undefined);
+            return (
+                buf.length > 4 &&
+                buf[0] === 0x25 && // %
+                buf[1] === 0x50 && // P
+                buf[2] === 0x44 && // D
+                buf[3] === 0x46    // F
+            );
+        } catch {
+            return false;
+        }
+    }
+
+    async checkEcardAvailable(
+        maid: number,
+        polId: number,
+        insurerId: number,
+        corpId: number,
+        ecardUrl: string,
+        accessKey: string,
+        tenantId: string,
+    ): Promise<boolean> {
+        if (!maid || !polId || !ecardUrl) return false;
+        try {
+            const request = {
+                printRequest: {
+                    executionMode: 'Single',
+                    identifierType: 'MemberId',
+                    printPattern: 'Single',
+                    identifierValue: String(maid),
+                },
+                printPattern: 'Single',
+                policyId: Number(polId),
+                insurerId: Number(insurerId) || 0,
+                corporateId: Number(corpId) || 0,
+                policySubId: 2,
+                outputType: 'PDFByteStream',
+                dbType: 'MA',
+                isPasswordEnabled: false,
+                printExpiredPolicy: false,
+            };
+
+            const resp: any = await this.ecardApiService.getEcardPdf(
+                request,
+                ecardUrl,
+                accessKey,
+                tenantId,
+            );
+
+            const bytes = resp?.data?.[0]?.printResponse?.fileBytes;
+            if (bytes && this.isPdfBuffer(bytes)) {
+                return true;
+            }
+            if (resp?.rawPdfBuffer && this.isPdfBuffer(resp.rawPdfBuffer)) {
+                return true;
+            }
+            return false;
+        } catch {
+            return false;
+        }
+    }
+
+    async checkCoverageAvailable(
+        benefPriId: number,
+        benefUserId: number,
+        polId: number,
+        insurerId: number,
+        maid: number,
+        corpId: number,
+        ecardUrl: string,
+        accessKey: string,
+        tenantId: string,
+    ): Promise<boolean> {
+        if (!polId || !ecardUrl) return false;
+        const priId = benefPriId > 0 ? benefPriId : maid;
+        const uId = benefUserId > 0 ? benefUserId : maid;
+        const polNum = Number(polId);
+
+        try {
+            const request: any = {
+                PribenefId: Number(priId),
+                BenefId: Number(uId),
+                MemberPolicyId: polNum,
+                MasterPolicyId: polNum,
+                InsurerId: Number(insurerId) || 0,
+                DbType: 'MAYFAIR',
+                OutputType: 'PDFByteStream',
+                CorporateId: Number(corpId) || 0,
+                AppId: '1',
+                PrintPattern: 'Single',
+            };
+
+            let resp: any = await this.ecardApiService.getCoverageLetter(
+                request,
+                ecardUrl,
+                accessKey,
+                tenantId,
+            );
+            let bytes = resp?.data?.[0]?.printResponse?.fileBytes;
+            if (bytes && this.isPdfBuffer(bytes)) {
+                return true;
+            }
+            if (resp?.rawPdfBuffer && this.isPdfBuffer(resp.rawPdfBuffer)) {
+                return true;
+            }
+
+            request.DbType = 'MA';
+            resp = await this.ecardApiService.getCoverageLetter(
+                request,
+                ecardUrl,
+                accessKey,
+                tenantId,
+            );
+            bytes = resp?.data?.[0]?.printResponse?.fileBytes;
+            if (bytes && this.isPdfBuffer(bytes)) {
+                return true;
+            }
+            if (resp?.rawPdfBuffer && this.isPdfBuffer(resp.rawPdfBuffer)) {
+                return true;
+            }
+
+            return false;
+        } catch {
+            return false;
+        }
+    }
+
+    async searchEcardDetails(
+        tenantId: string,
+        user: UserSessionPayload,
+        host: string,
+        body: any,
+    ): Promise<any> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+
+        const { corpId: corpIdBody, polId, benefName, docType } = body || {};
+        const sessionCorpId = Number((user as any)?.corpId || user?.providerCorpId || 0);
+        const effectiveCorpId = corpIdBody ? Number(corpIdBody) : sessionCorpId;
+        const filterPolId = polId ? Number(polId) : 0;
+        const requestedDocType = String(docType || 'ecard').toLowerCase();
+        const wantEcard = requestedDocType === 'ecard';
+        const wantCoi = requestedDocType === 'coi';
+
+        this.logger.debug('Processing searchEcardDetails', HRService.name, {
+            tenantId: normalizedTenantId,
+            effectiveCorpId,
+            filterPolId,
+            requestedDocType,
+            benefName,
+        });
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            if (!tenantConfig) {
+                return { success: false, message: 'Tenant not found' };
+            }
+
+            const v2Url = tenantConfig.config?.claimApis?.v2;
+            const v2Key = tenantConfig.config?.claimApis?.v2Key;
+            const v3Url = tenantConfig.config?.claimApis?.v3;
+            const ecardUrl = tenantConfig.config?.services?.ecard || v2Url;
+
+            // Step 1: BeneficiarySearch to find beneficiaries
+            const payload: any = {
+                PolicyCorpIds: effectiveCorpId > 0 ? [effectiveCorpId] : undefined,
+                Range: 50,
+                StartIndex: 0,
+            };
+            if (filterPolId > 0) payload.PolicyIds = [filterPolId];
+            if (benefName) payload.BeneficiaryName = String(benefName);
+
+            const benefResponse = await this.claimService.searchBeneficiaries(
+                payload,
+                v2Url,
+                v2Key,
+                normalizedTenantId,
+                false,
+            );
+
+            let benefs: any[] =
+                benefResponse?.BeneficiaryDetails ||
+                (benefResponse as any)?.beneficiaryDetails ||
+                [];
+
+            // Support full name searches (e.g. "John Doe"): if the combined name returns 0 results from
+            // external Elasticsearch, search by first and last name parts and filter locally.
+            const trimmedSearchName = String(benefName || '').trim();
+            const nameParts = trimmedSearchName.split(/\s+/).filter(Boolean);
+
+            if (benefs.length === 0 && nameParts.length > 1) {
+                const candidateMap = new Map<number, any>();
+
+                // Query by first word
+                try {
+                    const firstResp = await this.claimService.searchBeneficiaries(
+                        { ...payload, BeneficiaryName: nameParts[0], Range: 100 },
+                        v2Url,
+                        v2Key,
+                        normalizedTenantId,
+                        false,
+                    );
+                    const list =
+                        firstResp?.BeneficiaryDetails ||
+                        (firstResp as any)?.beneficiaryDetails ||
+                        [];
+                    list.forEach((b: any) => {
+                        const m = Number(b.benefMediAssistID || b.MediAssistID || b.mediAssistID || 0);
+                        if (m > 0) candidateMap.set(m, b);
+                    });
+                } catch {
+                    /* non-fatal fallback */
+                }
+
+                // Query by last word
+                try {
+                    const lastResp = await this.claimService.searchBeneficiaries(
+                        { ...payload, BeneficiaryName: nameParts[nameParts.length - 1], Range: 100 },
+                        v2Url,
+                        v2Key,
+                        normalizedTenantId,
+                        false,
+                    );
+                    const list =
+                        lastResp?.BeneficiaryDetails ||
+                        (lastResp as any)?.beneficiaryDetails ||
+                        [];
+                    list.forEach((b: any) => {
+                        const m = Number(b.benefMediAssistID || b.MediAssistID || b.mediAssistID || 0);
+                        if (m > 0) candidateMap.set(m, b);
+                    });
+                } catch {
+                    /* non-fatal fallback */
+                }
+
+                const normalizedParts = nameParts.map((p) => p.toLowerCase());
+                benefs = Array.from(candidateMap.values()).filter((b: any) => {
+                    const full = [
+                        b.benefName || b.Name || '',
+                        b.benefMiddleName || b.MiddleName || '',
+                        b.benefLastName || b.LastName || '',
+                    ]
+                        .filter(Boolean)
+                        .join(' ')
+                        .toLowerCase();
+                    return normalizedParts.every((part) => full.includes(part));
+                });
+            } else if (benefs.length > 0 && nameParts.length > 1) {
+                // Post-filter to ensure all words match
+                const normalizedParts = nameParts.map((p) => p.toLowerCase());
+                const strictMatches = benefs.filter((b: any) => {
+                    const full = [
+                        b.benefName || b.Name || '',
+                        b.benefMiddleName || b.MiddleName || '',
+                        b.benefLastName || b.LastName || '',
+                    ]
+                        .filter(Boolean)
+                        .join(' ')
+                        .toLowerCase();
+                    return normalizedParts.every((part) => full.includes(part));
+                });
+                if (strictMatches.length > 0) {
+                    benefs = strictMatches;
+                }
+            }
+
+            if (!benefs.length) {
+                return { success: false, message: 'No details found' };
+            }
+
+            // Group by MediAssistID (mirrors legacy HRHomeController.cs GetDetailsforEcard)
+            const maidMap = new Map<number, any>();
+            benefs.forEach((b: any) => {
+                const maid = Number(b.benefMediAssistID || b.MediAssistID || b.mediAssistID || 0);
+                if (maid > 0 && !maidMap.has(maid)) {
+                    maidMap.set(maid, b);
+                }
+            });
+            const groupedList = maidMap.size > 0 ? Array.from(maidMap.values()) : benefs;
+
+            const isHrRole = !user?.activePortal || user.activePortal === 'hr';
+            const ecardTag = isHrRole ? 'ShowECardForHR' : 'ShowECardForBroker';
+            const coiTag = isHrRole ? 'ShowCOIForHR' : 'ShowCOIForBroker';
+            const isBroker = user?.activePortal === 'broker';
+
+            // Step 2: Enrich each beneficiary and check document availability
+            const enrichedBenefs = await Promise.all(
+                groupedList.map(async (b: any) => {
+                    const maid = Number(b.benefMediAssistID || b.MediAssistID || b.mediAssistID || 0);
+                    let policyId = Number(b.benefPolID || b.PolID || b.polId || filterPolId || 0);
+                    let insurerId = Number(
+                        b?.policyDetail?.polInsCompID || b.PolInsCompID || b.polInsCompID || 0,
+                    );
+                    let benefPriId = Number(
+                        b.benefPriID ||
+                        b.BenefPriID ||
+                        b.benefPriId ||
+                        b.primaryBenefDetails?.priBenefID ||
+                        0,
+                    );
+                    let benefUserId = Number(b.benefUserID || b.BenefUserID || b.benefUserId || 0);
+                    const polSubType = Number(b.policySubType || b.PolSubType || 0);
+                    let email = String(b.benefEmail || b.BenefEmail || b.email || b.EmailId || '').trim();
+                    let pihNumber = String(
+                        b.benefNIAPersonID || b.BenefNIAPersonID || b.PihNumber || b.pihNumber || '',
+                    ).trim();
+                    let ecardAllowed = false;
+                    let coiAllowed = false;
+
+                    // V3 FetchMemberPolicyDeatils — get reliable insurerId & masterPolicyId
+                    const empCode: string = String(
+                        b?.primaryBenefDetails?.actualEmpCode ||
+                        b.PriBenefEmpCode ||
+                        b.priBenefEmpCode ||
+                        b.primaryBenefDetails?.priBenefEmpCode ||
+                        '',
+                    ).trim();
+
+                    if (policyId > 0 && empCode && v3Url) {
+                        try {
+                            const memberDetail = await this.claimService.fetchMemberPolicyDetails(
+                                v3Url,
+                                {
+                                    masterPolicyId: policyId,
+                                    employeeCode: empCode,
+                                    dbType: 'MA',
+                                },
+                                v2Key,
+                                normalizedTenantId,
+                            );
+                            const details =
+                                memberDetail?.memberPolicyDetails || memberDetail?.MemberPolicyDetails || [];
+                            const detail = details[0];
+                            if (detail?.insurerid) insurerId = Number(detail.insurerid);
+                            if (detail?.masterPolicyId) policyId = Number(detail.masterPolicyId) || policyId;
+                        } catch {
+                            this.logger.warn(
+                                `fetchMemberPolicyDetails enrichment failed for maid ${maid}, using BeneficiarySearch data`,
+                                HRService.name,
+                            );
+                        }
+                    }
+
+                    // If PIH number or family IDs missing, enrich via BeneficiaryFamily
+                    if ((!benefPriId || !benefUserId || !pihNumber || !email) && maid > 0 && v2Url) {
+                        try {
+                            const famResp = await this.claimService.getBeneficiaryFamily(maid, v2Url);
+                            const famBenef =
+                                famResp?.beneficiaryDetails?.[0] || famResp?.BeneficiaryDetails?.[0];
+                            if (famBenef) {
+                                if (!benefPriId) {
+                                    benefPriId = Number(
+                                        famBenef.benefPriID ||
+                                        famBenef.BenefPriID ||
+                                        famBenef.primaryBenefDetails?.priBenefID ||
+                                        0,
+                                    );
+                                }
+                                if (!benefUserId) {
+                                    benefUserId = Number(famBenef.benefUserID || famBenef.BenefUserID || 0);
+                                }
+                                if (!pihNumber) {
+                                    pihNumber = String(
+                                        famBenef.benefNIAPersonID || famBenef.BenefNIAPersonID || '',
+                                    ).trim();
+                                }
+                                if (!email) {
+                                    email = String(famBenef.benefEmail || famBenef.BenefEmail || '').trim();
+                                }
+                            }
+                        } catch {
+                            /* non-fatal fallback */
+                        }
+                    }
+
+                    // V3 FetchPolicyDetails — config tags decide ecard/COI policy permissions
+                    if (policyId > 0 && v3Url) {
+                        try {
+                            const planDetails = await this.claimService.fetchPolicyDetails(
+                                v3Url,
+                                { policyId },
+                                v2Key,
+                                normalizedTenantId,
+                            );
+                            const eCardConfig =
+                                planDetails?.eCardConfig || planDetails?.extraDetails?.eCardConfig;
+                            const coiConfig =
+                                planDetails?.coiConfig || planDetails?.extraDetails?.coiConfig;
+
+                            ecardAllowed =
+                                this.hasPolicyConfigTag(eCardConfig, ecardTag) ||
+                                this.hasPolicyConfigTag(eCardConfig, 'ShowECard') ||
+                                this.hasPolicyConfigTag(eCardConfig, 'ShowECardForHR') ||
+                                this.hasPolicyConfigTag(eCardConfig, 'ShowECardForBroker') ||
+                                isBroker;
+
+                            coiAllowed =
+                                this.hasPolicyConfigTag(coiConfig, coiTag) ||
+                                this.hasPolicyConfigTag(coiConfig, 'ShowCOI') ||
+                                this.hasPolicyConfigTag(coiConfig, 'ShowCOIForHR') ||
+                                this.hasPolicyConfigTag(coiConfig, 'ShowCOIForBroker') ||
+                                isBroker;
+                        } catch {
+                            if (isBroker) {
+                                ecardAllowed = true;
+                                coiAllowed = true;
+                            }
+                        }
+                    }
+
+                    // Document availability check (mirrors EcardController.IsEcardDocumentAvailable / IsCoverageDocumentAvailable)
+                    let docAvailable = false;
+                    if (wantEcard) {
+                        if (ecardAllowed && maid > 0 && policyId > 0) {
+                            docAvailable = await this.checkEcardAvailable(
+                                maid,
+                                policyId,
+                                insurerId,
+                                effectiveCorpId,
+                                ecardUrl,
+                                v2Key,
+                                normalizedTenantId,
+                            );
+                        }
+                    } else if (wantCoi) {
+                        if (coiAllowed && policyId > 0) {
+                            docAvailable = await this.checkCoverageAvailable(
+                                benefPriId,
+                                benefUserId,
+                                policyId,
+                                insurerId,
+                                maid,
+                                effectiveCorpId,
+                                ecardUrl,
+                                v2Key,
+                                normalizedTenantId,
+                            );
+                        }
+                    }
+
+                    const relId = Number(
+                        b.benefRelToPriID || b.BenefRelToPriID || b.relationToPrimaryBeneficiaryId || 0,
+                    );
+                    let relationship = b.benefRelName || b.Relation || b.relation || '';
+                    if (!relationship || relationship.trim() === '') {
+                        if ([1, 13].includes(relId)) relationship = 'Insured';
+                        else if ([6, 9, 17].includes(relId)) relationship = 'Spouse';
+                        else if ([4, 8, 18, 19, 20, 21, 22, 24, 28, 29, 30].includes(relId)) relationship = 'Child';
+                        else if ([2, 5, 11, 12].includes(relId)) relationship = 'Parent';
+                        else relationship = relId === 0 ? 'Insured' : 'Others';
+                    } else if (relationship.trim().toLowerCase() === 'self') {
+                        relationship = 'Insured';
+                    }
+
+                    const fullName = [
+                        b.benefName || b.Name,
+                        b.benefMiddleName || b.MiddleName,
+                        b.benefLastName || b.LastName,
+                    ]
+                        .filter(Boolean)
+                        .join(' ')
+                        .replace(/\s*undefined\s*/gi, ' ')
+                        .trim();
+
+                    return {
+                        maid,
+                        polId: policyId,
+                        benefPriId,
+                        benefUserId,
+                        insurerId,
+                        name: fullName || b.benefName || b.Name || '',
+                        email: email || b.benefEmail || b.BenefEmail || b.email || b.EmailId || '',
+                        pihNumber:
+                            pihNumber ||
+                            b.benefNIAPersonID ||
+                            b.BenefNIAPersonID ||
+                            b.PihNumber ||
+                            b.pihNumber ||
+                            '',
+                        relationship,
+                        polSubType,
+                        ecardAllowed,
+                        coiAllowed,
+                        docAvailable,
+                    };
+                }),
+            );
+
+            const sorted = enrichedBenefs.sort((a: any, b: any) =>
+                (a.name || '').localeCompare(b.name || ''),
+            );
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(`Completed searchEcardDetails in ${durationMs}ms`, HRService.name, {
+                totalResults: sorted.length,
+            });
+
+            return { success: true, beneficiaries: sorted };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching MWC ecard details after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, body },
+            );
+            return { success: false, error: 'Internal server error' };
         }
     }
 }

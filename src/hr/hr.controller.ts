@@ -7,6 +7,7 @@ import type { UserSessionPayload } from "../auth/auth.types.js";
 import { HRDashboardResponse, HRStatusResponse } from "./hr.types.js";
 import { GetCorpDto } from "./dto/corp.dto.js";
 import { UpdateBeneficiaryDetailsDto } from "./dto/beneficiary.dto.js";
+import { SearchEcardDetailsDto } from "./dto/ecard.dto.js";
 
 @Controller('hr')
 @UseGuards(JwtAuthGuard, HRRoleGuard)
@@ -293,5 +294,19 @@ export class HRController {
         }
 
         return this.hrService.getEcardDetails(tenantId, user, polId);
+    }
+
+    @Post('ecard-details')
+    async searchEcardDetails(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Headers('host') host: string,
+        @Body() body: SearchEcardDetailsDto,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.searchEcardDetails(tenantId, user, host || '', body);
     }
 }
