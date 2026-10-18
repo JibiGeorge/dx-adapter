@@ -624,4 +624,52 @@ export class DXApiService {
             throw err;
         }
     }
+
+    async uploadMaid(
+        baseUrl: string,
+        apiKey: string,
+        formData: FormData,
+    ): Promise<any> {
+        if (!baseUrl) {
+            this.logger.error('Enrollment API base URL is not configured', undefined, DXApiService.name);
+            throw new Error('Enrollment API URL is not configured.');
+        }
+
+        const cleanUrl = baseUrl.replace(/\/+$/, '');
+        const endpoint = `${cleanUrl}/api/broker/enrollments/upload-maid`;
+
+        this.logger.debug('Uploading maid spreadsheet to Enrollment API', DXApiService.name, {
+            endpoint,
+        });
+
+        try {
+            const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'X-API-Key': apiKey,
+                },
+                body: formData,
+            });
+
+            if (!res.ok) {
+                const errText = await res.text();
+                this.logger.error(`Enrollment upload-maid error: HTTP ${res.status} - ${errText}`, DXApiService.name);
+                const errorObj: any = new Error(errText || 'Upload service did not respond.');
+                errorObj.status = res.status;
+                throw errorObj;
+            }
+
+            const data = await res.json();
+            return data;
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+                `Error uploading maid: ${err.message}`,
+                err.stack,
+                DXApiService.name,
+                { endpoint },
+            );
+            throw err;
+        }
+    }
 }

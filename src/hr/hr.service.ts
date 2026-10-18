@@ -5748,4 +5748,88 @@ export class HRService {
             return { error: 'Could not download error report', status: 500 };
         }
     }
+
+    async uploadMaid(
+        tenantId: string,
+        user: UserSessionPayload,
+        file: UploadedMulterFile,
+        body: any,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        if (!file || !file.buffer || file.buffer.length === 0) {
+            return { success: false, message: 'Please choose a .xlsx file.', status: 400 };
+        }
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const enrollmentApiUrl = tenantConfig?.config?.dataexchange?.api || '';
+            const enrollmentApiKey = tenantConfig?.config?.dataexchange?.key || '';
+
+            if (!enrollmentApiUrl) {
+                this.logger.error('Enrollment API URL not configured', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { success: false, message: 'Enrollment API URL not configured', status: 500 };
+            }
+
+            const corpId =
+                user?.providerCorpId ||
+                (user as any)?.corpId ||
+                body?.corpId ||
+                '';
+            const polId = body?.polId || '';
+            const policyType = body?.policyType || 'broker_enrollments';
+            const uploaded_email_id = user?.emailId || '';
+            const uploaded_by =
+                user?.loginName ||
+                user?.userName ||
+                user?.emailId ||
+                'broker';
+
+            const form = new FormData();
+            const blob = new Blob([new Uint8Array(file.buffer)], {
+                type:
+                    file.mimetype ||
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            });
+            form.append('file', blob, file.originalname || 'enrollments.xlsx');
+            form.append('policy_type', policyType);
+            form.append('uploaded_by', uploaded_by);
+            if (corpId) form.append('corp_id', String(corpId));
+            if (polId) form.append('pol_id', String(polId));
+            if (uploaded_email_id) form.append('uploaded_email_id', uploaded_email_id);
+
+            const uploadData = await this.dxApiService.uploadMaid(
+                enrollmentApiUrl,
+                enrollmentApiKey,
+                form,
+            );
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Upload maid completed in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, fileName: file.originalname },
+            );
+
+            return { success: true, data: uploadData, status: 200 };
+        } catch (error: any) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Exception in UploadMaid after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId },
+            );
+            const statusCode = error?.status || 500;
+            return {
+                success: false,
+                message: `Server error during upload: ${error?.message || error}`,
+                status: statusCode,
+            };
+        }
+    }
 }

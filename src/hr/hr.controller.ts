@@ -754,4 +754,26 @@ export class HRController {
 
         return res.status(200).send(result.buffer);
     }
+
+    @Post(['upload-maid', 'UploadMaid'])
+    @UseInterceptors(FileInterceptor('file'))
+    async uploadMaid(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @UploadedFile() file: UploadedMulterFile,
+        @Body() body: any,
+        @Res() res: Response,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const result = await this.hrService.uploadMaid(tenantId, user, file, body);
+
+        if (!result.success) {
+            return res.status(result.status || 500).json({ success: false, message: result.message });
+        }
+
+        return res.status(result.status || 200).json(result);
+    }
 }
