@@ -92,7 +92,8 @@ export interface TenantInternalConfig {
   dataexchange: {
     api: string;
     key: string;
-  }
+  };
+  networkHospitalComponentUrl: string
 }
 
 export interface TentantDomain {
