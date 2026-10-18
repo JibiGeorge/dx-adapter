@@ -83,6 +83,14 @@ export class TenantService {
   }
 
   /**
+   * Resolve a tenant by hostname (host header or query).
+   */
+  async getTenantByHost(host: string): Promise<TenantConfigTypes | null> {
+    if (!host?.trim()) return null;
+    return this.tenantRepository.findByHost(host.trim());
+  }
+
+  /**
    * Returns only the public-safe tenant config fields.
    * Used by the /tenant/config endpoint.
    */

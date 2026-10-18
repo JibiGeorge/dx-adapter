@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { HttpService } from '../../../common/http/http.service.js';
 import { LoggingService } from '../../../common/logging/logging.service.js';
 import { AgentPolicySearchResponse, GroupCorpPolicyResponse } from './claim-api.types.js';
+import { TenantConfigTypes } from '../../tenant/tenant.types.js';
 
 @Injectable()
 export class ClaimApiService {
@@ -12,7 +13,7 @@ export class ClaimApiService {
 
   async searchPoliciesByAgent(
     brokerId: string | number,
-    allowedTPAIds: number[],
+    allowedTPAIds: string[] | number[],
     baseUrl: string,
   ): Promise<AgentPolicySearchResponse> {
     const cleanUrl = baseUrl.replace(/\/+$/, '');
@@ -127,5 +128,587 @@ export class ClaimApiService {
     }
 
     return response;
+  }
+
+  /**
+   * Resolves fallback corporate IDs when agent policy headers are empty or default.
+   * Shared across Broker and HR modules.
+   */
+  async resolveFallbackCorpIds(
+    tenantId: string,
+    user: { brokerId?: string | number; providerGroupCorpId?: string | number },
+    tenantConfig: { config?: { claimApis?: { v2?: string; v2Key?: string } } },
+    isLawton: boolean,
+  ): Promise<number[]> {
+    const groupCorpId = Number(user.providerGroupCorpId || 0);
+    const resolvedIds = new Set<number>();
+
+    const v2Url = tenantConfig.config?.claimApis?.v2;
+    const v2Key = tenantConfig.config?.claimApis?.v2Key || '';
+
+    if (groupCorpId > 0 && v2Url) {
+      try {
+        const groupCorpResponse = await this.searchPoliciesByGroupCorp(
+          groupCorpId,
+          tenantId,
+          v2Url,
+          v2Key,
+          false,
+        );
+
+        const policies = groupCorpResponse?.policyDetails || [];
+        for (const policy of policies) {
+          const cid = Number(policy.pol_CorporateId ?? policy.CorporateId ?? policy.corporateId ?? 0);
+          if (cid > 0) {
+            resolvedIds.add(cid);
+          }
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Failed searching policies by group corp: ${(err as Error).message}`,
+          ClaimApiService.name,
+          { groupCorpId, tenantId },
+        );
+      }
+
+      if (resolvedIds.size === 0) {
+        resolvedIds.add(groupCorpId);
+      }
+    }
+
+    return Array.from(resolvedIds);
+  }
+
+  async searchClaims(
+    baseUrl: string,
+    tenantConfig: TenantConfigTypes,
+    searchRequest: any,
+    role: string,
+  ) {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/api/v2/ClaimSearch/.json/`;
+
+    // Safely resolve DNSHostName by matching role, falling back to first domain or empty string
+    const matchedDomain =
+      tenantConfig.domains?.find(
+        (domain) => domain?.portal?.toLowerCase() === role?.toLowerCase(),
+      ) || tenantConfig.domains?.[0];
+    const dnsHostName = matchedDomain?.host || '';
+
+    const allowedTPAIds =
+      tenantConfig.config?.additionalConfigs?.allowedTPAIds || '';
+
+    const accessKey = tenantConfig.config?.claimApis?.v2Key || '';
+    const tenantId = tenantConfig.tenantId || '';
+
+    this.logger.debug('Searching claims', ClaimApiService.name, {
+      endpoint,
+      ...searchRequest,
+      dnsHostName,
+      role,
+    });
+
+    const payload = {
+      DNSHostName: dnsHostName,
+      AllowedTPAIds: allowedTPAIds,
+      ...searchRequest,
+      Range: 100,
+      StartIndex: 0,
+    };
+
+    const response = await this.httpService.post<any>(endpoint, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...(accessKey ? { 'X-CA-SHARED-KEY': accessKey } : {}),
+        ...(tenantId ? { Payer: tenantId } : {}),
+      },
+    });
+
+    if (!response?.isSuccess) {
+      this.logger.warn('Claim search failed or returned unsuccessful', ClaimApiService.name, {
+        endpoint,
+        response,
+      });
+
+      return { isSuccess: false, claimSearchResults: [] };
+    }
+
+    return response;
+  }
+
+  async searchBeneficiaries(payload: any, baseUrl: string, accessKey: string, tenantId: string, showAllClaims: boolean) {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/api/v2/BeneficiarySearch/.json`;
+
+    this.logger.debug('Searching beneficiaries', ClaimApiService.name, {
+      endpoint,
+      tenantId,
+      payload,
+    });
+
+    const response = await this.httpService.post<AgentPolicySearchResponse>(endpoint, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CA-SHARED-KEY': accessKey,
+        'Payer': tenantId,
+        'LoadArchive': showAllClaims ? 'True' : 'False',
+      },
+    });
+
+    this.logger.debug('Searched beneficiaries successfully', ClaimApiService.name, {
+      endpoint,
+      tenantId,
+      hasResponse: Boolean(response),
+    });
+
+    return response;
+  }
+
+  async fetchMemberPolicyDetails(baseUrl: string, payload: any, accessKey: string, tenantId: string) {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/FetchMemberPolicyDeatils`;
+
+    this.logger.debug('Fetching member policy details', ClaimApiService.name, {
+      endpoint,
+      tenantId,
+      payload,
+    });
+
+    try {
+      const response = await this.httpService.post<any>(endpoint, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CA-SHARED-KEY': accessKey,
+          'Payer': tenantId,
+        },
+      });
+
+      this.logger.debug('Fetched member policy details successfully', ClaimApiService.name, {
+        endpoint,
+        tenantId,
+        hasResponse: Boolean(response),
+      });
+
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `Failed to fetch member policy details: ${err.message}`,
+        err.stack,
+        ClaimApiService.name,
+        { endpoint, tenantId, payload },
+      );
+      throw error;
+    }
+  }
+
+  async fetchPolicyDetails(baseUrl: string, payload: any, accessKey: string, tenantId: string) {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/FetchPolicyDetails`;
+
+    this.logger.debug('Fetching policy details', ClaimApiService.name, {
+      endpoint,
+      tenantId,
+      payload,
+    });
+
+    try {
+      const response = await this.httpService.post<any>(endpoint, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CA-SHARED-KEY': accessKey,
+          'Payer': tenantId,
+        },
+      });
+
+      this.logger.debug('Fetched policy details successfully', ClaimApiService.name, {
+        endpoint,
+        tenantId,
+        hasResponse: Boolean(response),
+      });
+
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `Failed to fetch policy details: ${err.message}`,
+        err.stack,
+        ClaimApiService.name,
+        { endpoint, tenantId, payload },
+      );
+      throw error;
+    }
+  }
+
+  async getPolicyDocuments(baseUrl: string, accessKey: string, tenantId: string, payload: any) {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/api/v2/policy/attachments/`;
+
+    this.logger.debug('Fetching policy documents', ClaimApiService.name, {
+      endpoint,
+      tenantId,
+      payload,
+    });
+
+    try {
+      const response = await this.httpService.post<any>(endpoint, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CA-SHARED-KEY': accessKey,
+          'Payer': tenantId,
+          'LoadArchive': 'False',
+        },
+      });
+
+      this.logger.debug('Fetched policy documents successfully', ClaimApiService.name, {
+        endpoint,
+        tenantId,
+        hasResponse: Boolean(response),
+      });
+
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `Failed to fetch policy documents: ${err.message}`,
+        err.stack,
+        ClaimApiService.name,
+        { endpoint, tenantId, payload },
+      );
+      throw error;
+    }
+  }
+
+  async getAllMaidsForCorps(baseUrl: string, accessKey: string, tenantId: string, corpIds: number[], nameFilter?: string, codeFilter?: string): Promise<number[]> {
+    const PAGE_SIZE = 100;
+    const queries: string[] = [];
+    const allMaids = new Set<number>();
+
+    // Determine search queries: if multi-word name, search with the full name as well as individual tokens
+    if (nameFilter && nameFilter.trim()) {
+      const trimmed = nameFilter.trim();
+      queries.push(trimmed);
+      const tokens = trimmed.split(/\s+/).filter(t => t.length >= 2);
+      if (tokens.length > 1) {
+        // Add the last token (surname) and first token (given name) if distinct
+        const lastToken = tokens[tokens.length - 1];
+        const firstToken = tokens[0];
+        if (!queries.includes(lastToken)) queries.push(lastToken);
+        if (!queries.includes(firstToken)) queries.push(firstToken);
+      }
+    } else {
+      queries.push('');
+    }
+
+    for (const q of queries) {
+      let startIndex = 0;
+      let pageCount = 0;
+      let hasMore = true;
+      const MAX_PAGES = (q || codeFilter) ? 2 : 1;
+
+      while (hasMore && pageCount < MAX_PAGES) {
+        pageCount++;
+        const payload: any = {
+          PolicyCorpIds: corpIds,
+          EmployeeNo: codeFilter || '',
+          BeneficiaryName: q,
+          Range: PAGE_SIZE,
+          StartIndex: startIndex,
+        };
+
+        try {
+          const res = await this.searchBeneficiaries(payload, baseUrl, accessKey, tenantId, false);
+          const benefs: any = res?.BeneficiaryDetails || res?.beneficiaryDetails || [];
+          benefs.forEach((b: any) => {
+            const maid = Number(b.benefMediAssistID || b.BenefMediAssistID || 0);
+            if (maid > 0) allMaids.add(maid);
+          });
+          this.logger.debug(
+            `getAllMaidsForCorps (query="${q}") page StartIndex=${startIndex}: got ${benefs.length} beneficiaries`,
+            ClaimApiService.name,
+          );
+          if (benefs.length < PAGE_SIZE) {
+            hasMore = false;
+          } else {
+            startIndex += PAGE_SIZE;
+          }
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          this.logger.warn(
+            `getAllMaidsForCorps query="${q}" page failed, stopping pagination: ${err.message}`,
+            ClaimApiService.name,
+          );
+          hasMore = false;
+        }
+      }
+    }
+
+    this.logger.debug(
+      `getAllMaidsForCorps: collected ${allMaids.size} unique MAIDs for ${corpIds.length} corps`,
+      ClaimApiService.name,
+    );
+    return Array.from(allMaids);
+  }
+
+  async getClaimDetails(claimId: string, dbType: string, baseUrl: string, accesskey: string, tenantId: string,) {
+    const numericClaimId = parseInt(claimId);
+
+    if (!numericClaimId || !dbType || !baseUrl) {
+      throw new Error("Invalid request");
+    }
+
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/api/v2/ClaimSearch/.json/`;
+
+    const payload = {
+      ClaimId: numericClaimId,
+      DbType: dbType,
+      Role: "Broker"
+    }
+
+    this.logger.debug("Claim search details", ClaimApiService.name, {
+      endpoint,
+      payload,
+    })
+
+    const response = await this.httpService.post<any>(endpoint, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CA-SHARED-KEY': accesskey,
+        'Payer': tenantId,
+        'LoadArchive': 'False',
+      },
+    });
+
+    if (!response?.isSuccess) {
+      this.logger.warn('Claim search failed or returned unsuccessful', ClaimApiService.name, {
+        endpoint,
+        response,
+      });
+
+      return response;
+    }
+
+    return response;
+  }
+
+  async downloadDmsFile(
+    fileGuid: string,
+    dmsHostOverride?: string,
+    appIdOverride?: string,
+    appUrlOverride?: string,
+  ): Promise<{ fileName: string; fileBytes: string }> {
+    const dmsHost = dmsHostOverride || process.env.DMS_HOST_URL || 'https://uat-lawton-dms.lawtonasia.com';
+    const appId = appIdOverride || process.env.MB_APP_ID || '9240';
+    const appUrl = appUrlOverride || process.env.MB_APP_URL || 'https://uat-maglobal.lawtonasia.com/';
+
+    const cleanHost = dmsHost.replace(/\/+$/, '');
+    const endpoint = `${cleanHost}/DownloadFile?format=json`;
+
+    this.logger.debug(`Calling DMS DownloadFile for fileGuid: ${fileGuid}`, ClaimApiService.name, {
+      endpoint,
+      fileGuid,
+      appId,
+    });
+
+    try {
+      let dlRes = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          mbappid: appId,
+          mbappurl: appUrl,
+        },
+        body: JSON.stringify({ FileIdentifier: fileGuid }),
+      });
+
+      if (!dlRes.ok) {
+        const getEndpoint = `${cleanHost}/DownloadFile?FileIdentifier=${encodeURIComponent(fileGuid)}&filepath=${encodeURIComponent(fileGuid)}&format=json`;
+        dlRes = await fetch(getEndpoint, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            mbappid: appId,
+            mbappurl: appUrl,
+          },
+        });
+      }
+
+      if (dlRes.ok) {
+        const textData = await dlRes.text();
+        try {
+          const data = JSON.parse(textData);
+          const fileBytes = data?.FileBytes || data?.fileBytes || '';
+          const fileName = data?.FileName || data?.fileName || fileGuid;
+          return { fileName, fileBytes };
+        } catch {
+          const fileBytes = Buffer.from(textData, 'binary').toString('base64');
+          return { fileName: fileGuid, fileBytes };
+        }
+      }
+
+      throw new Error(`DMS download failed with status ${dlRes.status}`);
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `downloadDmsFile error: ${err.message}`,
+        err.stack,
+        ClaimApiService.name,
+        { endpoint, fileGuid },
+      );
+      throw err;
+    }
+  }
+
+  async uploadDmsFile(
+    userName: string,
+    fileBuffer: Buffer | Uint8Array,
+    fileName: string,
+    mimeType?: string,
+    appIdOverride?: string,
+    appUrlOverride?: string,
+    dmsHostOverride?: string,
+  ): Promise<any> {
+    const dmsHost = dmsHostOverride || process.env.DMS_HOST_URL || 'https://uat-lawton-dms.lawtonasia.com';
+    const appId = appIdOverride || process.env.MB_APP_ID || '9240';
+    const appUrl = appUrlOverride || process.env.MB_APP_URL || 'https://uat-maglobal.lawtonasia.com/';
+
+    const cleanHost = dmsHost.replace(/\/+$/, '');
+    const endpoint = `${cleanHost}/UploadFile?UserName=${encodeURIComponent(userName || '')}&FileType=2&FolderName=&format=json`;
+
+    this.logger.debug(`Calling DMS UploadFile for userName: ${userName}, fileName: ${fileName}`, ClaimApiService.name, {
+      endpoint,
+      userName,
+      fileName,
+      appId,
+    });
+
+    try {
+      const formData = new FormData();
+      const blob = new Blob([new Uint8Array(fileBuffer)], {
+        type: mimeType || 'image/jpeg',
+      });
+      formData.append('file', blob, fileName || 'profilePic.jpg');
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          mbappid: appId,
+          mbappurl: appUrl,
+        },
+        body: formData,
+      });
+
+      const data = await response.json().catch(() => null);
+      return data;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug(
+        `DMS upload background attempt error: ${err.message}`,
+        ClaimApiService.name,
+        { endpoint, userName, fileName },
+      );
+      throw err;
+    }
+  }
+
+  async getPolicyLivesCount(
+    policyId: number,
+    startDateMs: number,
+    baseUrl: string,
+    accessKey: string,
+    tenantId: string,
+  ): Promise<any> {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/api/v2/PolicyLives/`;
+
+    const payload = {
+      policyId,
+      policyStartDate: `/Date(${startDateMs || 0})/`,
+      dbType: 'MA',
+    };
+
+    this.logger.debug(`Calling PolicyLives for policyId: ${policyId}`, ClaimApiService.name, {
+      endpoint,
+      policyId,
+      startDateMs,
+      tenantId,
+    });
+
+    try {
+      const response = await this.httpService.post<any>(endpoint, payload, {
+        tenantId,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CA-SHARED-KEY': accessKey,
+          'Payer': tenantId,
+          'LoadArchive': 'False',
+        },
+      });
+
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `getPolicyLivesCount error: ${err.message}`,
+        err.stack,
+        ClaimApiService.name,
+        { endpoint, policyId },
+      );
+      throw err;
+    }
+  }
+
+  async getHospitalsByLocation(baseUrl: string, payload: any): Promise<any> {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/getHospitalsByLocation`;
+
+    this.logger.debug(`Calling getHospitalsByLocation at: ${endpoint}`, ClaimApiService.name, {
+      endpoint,
+      payload,
+    });
+
+    try {
+      const response = await this.httpService.post<any>(endpoint, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `getHospitalsByLocation error: ${err.message}`,
+        err.stack,
+        ClaimApiService.name,
+        { endpoint },
+      );
+      throw err;
+    }
+  }
+
+  async getHospitalSpecialities(baseUrl: string): Promise<any> {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/HospitalSpecialities.json`;
+
+    this.logger.debug(`Calling getHospitalSpecialities at: ${endpoint}`, ClaimApiService.name, {
+      endpoint,
+    });
+
+    try {
+      const response = await this.httpService.get<any>(endpoint);
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.warn(
+        `getHospitalSpecialities warning/error: ${err.message}`,
+        ClaimApiService.name,
+        { endpoint },
+      );
+      return null;
+    }
   }
 }

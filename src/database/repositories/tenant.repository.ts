@@ -36,6 +36,29 @@ export class TenantRepository {
   }
 
   /**
+   * Find a tenant by a hostname in its domains array.
+   */
+  async findByHost(host: string): Promise<TenantConfigTypes | null> {
+    if (!host) return null;
+    const cleanHost = host.trim().toLowerCase().split(':')[0]; // strip port if present
+
+    const doc = await this.collection.findOne<Record<string, any>>(
+      {
+        $or: [
+          { 'domains.host': cleanHost },
+          { 'domains.host': host.trim().toLowerCase() },
+          { 'config.app.url': { $regex: cleanHost, $options: 'i' } },
+        ],
+      },
+      { projection: { _id: 0 } },
+    );
+
+    if (!doc) return null;
+
+    return this.toConfigTypes(doc);
+  }
+
+  /**
    * Map a raw MongoDB document to the canonical TenantConfigTypes shape.
    */
   private toConfigTypes(
@@ -48,6 +71,9 @@ export class TenantRepository {
       version: doc.version ?? 1,
 
       config: {
+        corpId: doc.config?.corpId ?? 0,
+        macpDb: doc.config.macpDb ?? '',
+        networkHospitalComponentUrl: doc.config?.networkHospitalComponentUrl ?? '',
         app: {
           name: doc.config?.app?.name ?? '',
           url: doc.config?.app?.url ?? '',
@@ -72,6 +98,7 @@ export class TenantRepository {
           v2Key: doc.config?.claimApis?.v2Key ?? '',
           v3: doc.config?.claimApis?.v3 ?? '',
           pairKey: doc.config?.claimApis?.pairKey ?? '',
+          proclaimApiUrl: doc.config?.claimApis?.proclaimApiUrl ?? ''
         },
 
         database: {
@@ -111,6 +138,10 @@ export class TenantRepository {
           hrDashboards: Array.isArray(doc.config?.additionalConfigs?.hrDashboards)
             ? doc.config.additionalConfigs.hrDashboards
             : [],
+        },
+        dataexchange: {
+          api: doc.config?.dataexchange?.api ?? '',
+          key: doc.config?.dataexchange?.key ?? '',
         },
       },
     };

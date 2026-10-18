@@ -29,16 +29,18 @@ export class BrokerController {
   async getBrokerData(
     @Headers('x-tenant-id') tenantId: string,
     @CurrentUser() user: UserSessionPayload,
+    @Headers('host') host: string,
   ): Promise<DashboardResponse> {
     if (!tenantId?.trim()) {
       throw new BadRequestException('x-tenant-id header is required');
     }
 
-    return this.brokerService.getBrokerData(tenantId, user);
+    return this.brokerService.getBrokerData(tenantId, user, host);
   }
 
   @Get('policy-list')
   async getPolicyList(
+    @Headers('host') host: string,
     @Headers('x-tenant-id') tenantId: string,
     @CurrentUser() user: UserSessionPayload,
   ): Promise<any> {
@@ -46,7 +48,7 @@ export class BrokerController {
       throw new BadRequestException('x-tenant-id header is required');
     }
 
-    return this.brokerService.getPolicyList(tenantId, user);
+    return this.brokerService.getPolicyList(tenantId, user, host);
   }
 
   @Get('member-claim-data')
