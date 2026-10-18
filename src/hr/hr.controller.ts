@@ -15,6 +15,7 @@ import { HospitalSearchDto } from "./dto/hospital.dto.js";
 import { PowerBIDto } from "./dto/powerbi.dto.js";
 import { EnrollmentStatusQueryDto } from "./dto/enrollment-status.dto.js";
 import { EnrollmentOperationDto } from "./dto/enrollment-operation.dto.js";
+import type { UpdateProfileDto } from "./dto/update-profile.dto.js";
 
 @Controller('hr')
 @UseGuards(JwtAuthGuard, HRRoleGuard)
@@ -813,5 +814,22 @@ export class HRController {
         }
 
         return this.hrService.getProfile(tenantId, user);
+    }
+
+    @Post('profile/update')
+    async updateProfile(
+        @Headers('x-tenant-id') tenantId: string,
+        @Headers('authorization') authHeader: string | undefined,
+        @CurrentUser() user: UserSessionPayload,
+        @Body() body: UpdateProfileDto,
+        @Res() res: Response,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            return res.status(400).json({ isSuccess: false, message: 'x-tenant-id header is required' });
+        }
+
+        const result = await this.hrService.updateProfile(tenantId, user, authHeader, body);
+        const status = result.isSuccess ? 200 : (result.message?.includes('10-digit') ? 400 : 500);
+        return res.status(status).json(result);
     }
 }

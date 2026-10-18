@@ -83,4 +83,46 @@ export class UserProfileRepository {
   setInMemoryOverride(key: string, overrides: UserProfileOverrides): void {
     this.inMemoryProfileStore.set(key, overrides);
   }
+
+  async saveProfileOverrides(
+    loginName: string,
+    overrides: UserProfileOverrides,
+    scope?: string,
+  ): Promise<void> {
+    if (!loginName) return;
+    const key = buildProfileKey(loginName, scope);
+    const existing = this.inMemoryProfileStore.get(key) || {};
+    const updated: UserProfileOverrides = { ...existing };
+
+    if (overrides.address !== undefined) updated.address = overrides.address;
+    if (overrides.mobile !== undefined) updated.mobile = overrides.mobile;
+    if (overrides.altMobile !== undefined) updated.altMobile = overrides.altMobile;
+    if (overrides.altEmailId !== undefined) updated.altEmailId = overrides.altEmailId;
+    if (overrides.profileImgUrl !== undefined) updated.profileImgUrl = overrides.profileImgUrl;
+    if (overrides.profileImgData !== undefined) updated.profileImgData = overrides.profileImgData;
+
+    this.inMemoryProfileStore.set(key, updated);
+
+    try {
+      await this.collection.updateOne(
+        { loginKey: key },
+        {
+          $set: {
+            ...updated,
+            loginKey: key,
+            loginName: loginName.toLowerCase().trim(),
+            scope: (scope || '').toLowerCase().trim(),
+            updatedAt: new Date(),
+          },
+        },
+        { upsert: true },
+      );
+    } catch (err: any) {
+      this.logger.debug(
+        `Profile override saved in memory for ${key} (DB error: ${err?.message})`,
+        UserProfileRepository.name,
+      );
+    }
+  }
 }
+

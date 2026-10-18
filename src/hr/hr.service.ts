@@ -16,6 +16,8 @@ import { DXApiService } from "../integrations/dx-api/dx-api.service.js";
 import { EcardApiService } from "../integrations/ecard-api/ecard-api.service.js";
 import { ProclaimApiService } from "../integrations/proclaim-api/proclaim-api.service.js";
 import { TENANTS } from "../../utils/tentant-helper.js";
+import { JwtService } from "@nestjs/jwt";
+import { UpdateProfileDto } from "./dto/update-profile.dto.js";
 
 interface PolicyBeneficiariesParams {
     policyNo: string;
@@ -100,6 +102,7 @@ export class HRService {
         private readonly ecardApiService: EcardApiService,
         private readonly proclaimApiService: ProclaimApiService,
         private readonly userProfileRepo: UserProfileRepository,
+        private readonly jwtService: JwtService,
     ) { }
 
     async getHRData(tenantId: string, user: UserSessionPayload): Promise<HRDashboardResponse> {
@@ -6009,6 +6012,165 @@ export class HRService {
                 { tenantId: normalizedTenantId, userId: user?.userId },
             );
             return { success: false, message: 'Internal server error fetching profile' };
+        }
+    }
+
+    async updateProfile(
+        tenantId: string,
+        user: UserSessionPayload,
+        authHeader: string | undefined,
+        body: UpdateProfileDto,
+    ): Promise<{
+        isSuccess: boolean;
+        message: string;
+        token?: string;
+        profile?: any;
+    }> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+
+        try {
+            const { address, mobile, email, altMobile, altEmailId } = body || {};
+
+            if (mobile !== undefined && mobile !== null && mobile !== '') {
+                const cleanMobile = String(mobile).trim().replace(/\D/g, '');
+                if (cleanMobile.length !== 10) {
+                    return { isSuccess: false, message: 'Please enter valid 10-digit mobile number' };
+                }
+            }
+
+            const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const mediAuthUrl =
+                process.env.MEDIAUTH_URL ||
+                tenantConfig?.config?.auth?.api ||
+                '';
+            const applicationId =
+                process.env.APPLICATION_ID ||
+                tenantConfig?.config?.auth?.appId ||
+                process.env.MB_APP_ID ||
+                '9192';
+            const mbAppId = process.env.MB_APP_ID || applicationId || '9192';
+
+            const authToken =
+                user?.accessToken ||
+                (authHeader ? authHeader.replace(/^Bearer\s+/i, '') : '');
+
+            const updateProfileReq = {
+                ApplicationId: applicationId || mbAppId,
+                applicationId: applicationId || mbAppId,
+                AuthToken: authToken,
+                authToken: authToken,
+                baseProfile: {
+                    UserId: user?.userId,
+                    userId: user?.userId,
+                    FirstName: user?.userName || user?.loginName || '',
+                    firstName: user?.userName || user?.loginName || '',
+                    LastName: '',
+                    lastName: '',
+                    UserName: user?.loginName || '',
+                    userName: user?.loginName || '',
+                    Maid: user?.maid || 0,
+                    maid: user?.maid || 0,
+                    EntityId: user?.providerCorpId || 0,
+                    entityId: user?.providerCorpId || 0,
+                    EmployeeId: user?.empCode || '',
+                    employeeId: user?.empCode || '',
+                    Address: address !== undefined ? address : (user?.address || ''),
+                    address: address !== undefined ? address : (user?.address || ''),
+                    MobileNo: mobile !== undefined ? mobile : (user?.mobile || ''),
+                    mobileNo: mobile !== undefined ? mobile : (user?.mobile || ''),
+                    EmailId: email !== undefined ? email : (user?.emailId || ''),
+                    emailId: email !== undefined ? email : (user?.emailId || ''),
+                    AltMobileNo: altMobile !== undefined ? altMobile : (user?.altMobile || ''),
+                    altMobileNo: altMobile !== undefined ? altMobile : (user?.altMobile || ''),
+                    AltEmailId: altEmailId !== undefined ? altEmailId : (user?.altEmailId || ''),
+                    altEmailId: altEmailId !== undefined ? altEmailId : (user?.altEmailId || ''),
+                },
+            };
+
+            const cleanMediAuthUrl = mediAuthUrl.replace(/\/$/, '');
+            const authRes = await fetch(`${cleanMediAuthUrl}/UserDetails/UpdateBaseUserProfile`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${authToken}`,
+                },
+                body: JSON.stringify(updateProfileReq),
+            });
+
+            const authData: any = await authRes.json().catch(() => ({}));
+            if (!authRes.ok || authData?.IsSuccess === false || authData?.isSuccess === false) {
+                const errMsg =
+                    authData?.ErrorMessage ||
+                    authData?.errorMessage ||
+                    'Failed to update profile information in Auth system.';
+                this.logger.error(
+                    `MediAuth UpdateBaseUserProfile failed: status=${authRes.status}, err=${errMsg}`,
+                    undefined,
+                    HRService.name,
+                    { tenantId: normalizedTenantId, userId: user?.userId },
+                );
+                return { isSuccess: false, message: errMsg };
+            }
+
+            const portalName = user?.activePortal || 'hr';
+            await this.userProfileRepo.saveProfileOverrides(
+                user?.loginName,
+                {
+                    address: address !== undefined ? address : user?.address,
+                    mobile: mobile !== undefined ? mobile : user?.mobile,
+                    altMobile: altMobile !== undefined ? altMobile : user?.altMobile,
+                    altEmailId: altEmailId !== undefined ? altEmailId : user?.altEmailId,
+                },
+                portalName,
+            );
+
+            const updatedUserSession: UserSessionPayload = {
+                ...user,
+                activePortal: portalName,
+                address: address !== undefined ? address : user?.address,
+                mobile: mobile !== undefined ? mobile : user?.mobile,
+                emailId: email !== undefined ? email : user?.emailId,
+                altMobile: altMobile !== undefined ? altMobile : user?.altMobile,
+                altEmailId: altEmailId !== undefined ? altEmailId : user?.altEmailId,
+            };
+
+            const newToken = await this.jwtService.signAsync(updatedUserSession);
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Profile updated successfully in ${durationMs}ms for ${user?.loginName}`,
+                HRService.name,
+                { tenantId: normalizedTenantId, loginName: user?.loginName, portalName },
+            );
+
+            return {
+                isSuccess: true,
+                message: 'Profile information updated successfully',
+                token: newToken,
+                profile: {
+                    name: user?.userName || user?.loginName || '',
+                    loginName: user?.loginName || '',
+                    email: updatedUserSession.emailId || '',
+                    mobile: updatedUserSession.mobile || '',
+                    address: updatedUserSession.address || '',
+                    altMobile: updatedUserSession.altMobile || '',
+                    altEmailId: updatedUserSession.altEmailId || '',
+                    empCode: user?.empCode || '',
+                    profileImgUrl: user?.activePortal === portalName ? (user?.profileImgUrl || '') : '',
+                    brokerCode: (user as any)?.brokerId || '',
+                },
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error updating basic profile information after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            return { isSuccess: false, message: 'Internal server error while updating profile.' };
         }
     }
 }
