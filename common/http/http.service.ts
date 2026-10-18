@@ -11,6 +11,7 @@ export interface HttpRequestOptions {
   timeoutMs?: number;
   tenantId?: string;
   signal?: AbortSignal;
+  responseType?: 'json' | 'buffer';
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -119,7 +120,13 @@ export class HttpService {
     let responseData: unknown;
     const contentType = response.headers.get('content-type') || '';
 
-    if (contentType.includes('application/json')) {
+    if (
+      options?.responseType === 'buffer' ||
+      contentType.includes('application/pdf') ||
+      contentType.includes('application/octet-stream')
+    ) {
+      responseData = Buffer.from(await response.arrayBuffer());
+    } else if (contentType.includes('application/json')) {
       try {
         responseData = await response.json();
       } catch {
@@ -138,10 +145,11 @@ export class HttpService {
     }
 
     if (!response.ok) {
+      const errorBody = typeof responseData === 'object' ? JSON.stringify(responseData) : String(responseData ?? '');
       this.logger.error(
-        `Upstream HTTP ${response.status} returned from ${method} ${resolvedUrl}${tenantId ? ` [tenant: ${tenantId}]` : ''}`,
+        `Upstream HTTP ${response.status} returned from ${method} ${resolvedUrl}${tenantId ? ` [tenant: ${tenantId}]` : ''}. Error body: ${errorBody}`,
       );
-      throw new BadGatewayException('The upstream service could not process the request.');
+      throw new BadGatewayException(`The upstream service returned HTTP ${response.status}: ${errorBody || response.statusText}`);
     }
 
     return responseData as T;

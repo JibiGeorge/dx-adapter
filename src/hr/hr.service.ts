@@ -3407,4 +3407,126 @@ export class HRService {
             return { success: false, error: 'Internal server error' };
         }
     }
+
+    async viewEcard(
+        tenantId: string,
+        user: UserSessionPayload,
+        body: any,
+    ): Promise<any> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+
+        const corpIdBody = Number(body?.corpId || 0);
+        const sessionCorpId = Number((user as any)?.corpId || user?.providerCorpId || 0);
+        let corpId = corpIdBody > 0 ? corpIdBody : sessionCorpId;
+
+        const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+        const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+        if (!corpId || corpId <= 0) {
+            const corpIds = await this.claimService.resolveFallbackCorpIds(
+            normalizedTenantId,
+            user,
+            tenantConfig,
+            isLawton,
+        );
+            corpId = corpIds[0] || sessionCorpId;
+        }
+        
+
+        const effectivePolId = Number(
+            body?.polId || body?.policyId || body?.memberPolicyId || 0,
+        );
+        const maid = Number(body?.maid || 0);
+        const insurerId = Number(body?.insurerId || 0);
+        const requestedPattern = String(body?.printPattern || 'Single');
+
+        if (!maid || !effectivePolId) {
+            return { isSuccess: false, message: 'maid and polId are required' };
+        }
+
+        this.logger.debug('Processing viewEcard', HRService.name, {
+            tenantId: normalizedTenantId,
+            corpId,
+            maid,
+            effectivePolId,
+            insurerId,
+            requestedPattern,
+        });
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            if (!tenantConfig) {
+                return { isSuccess: false, message: 'Tenant not found' };
+            }
+
+            const v2Url = tenantConfig.config?.claimApis?.v2;
+            const v2Key = tenantConfig.config?.claimApis?.v2Key;
+            const ecardUrl = tenantConfig.config?.services?.ecard || v2Url;
+
+            const request = {
+                printRequest: {
+                    executionMode: 'Single',
+                    identifierType: 'MemberId',
+                    printPattern: requestedPattern,
+                    identifierValue: String(maid),
+                },
+                printPattern: requestedPattern,
+                policyId: effectivePolId,
+                insurerId,
+                corporateId: corpId,
+                policySubId: 2, // matches GetPdfResponseIndividual used by DownloadEcardAndResponseIframe
+                outputType: 'PDFByteStream',
+                dbType: 'MA',
+                isPasswordEnabled: false,
+                printExpiredPolicy: false,
+            };
+
+            const pdfresp: any = await this.ecardApiService.getEcardPdf(
+                request,
+                ecardUrl,
+                v2Key,
+                normalizedTenantId,
+            );
+
+            let pdfBuffer: Buffer | null = null;
+            if (pdfresp?.rawPdfBuffer && Buffer.isBuffer(pdfresp.rawPdfBuffer)) {
+                pdfBuffer = pdfresp.rawPdfBuffer;
+            } else if (pdfresp?.data?.[0]?.printResponse?.fileBytes) {
+                const fb = pdfresp.data[0].printResponse.fileBytes;
+                pdfBuffer = typeof fb === 'string' ? Buffer.from(fb, 'base64') : Buffer.from(fb);
+            }
+
+            if (!pdfBuffer || pdfBuffer.length === 0) {
+                this.logger.warn('Ecard API returned no data', HRService.name, {
+                    maid,
+                    polId: effectivePolId,
+                });
+                return { isSuccess: false, message: 'Failed to retrieve ecard.' };
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(`Retrieved ecard PDF successfully in ${durationMs}ms`, HRService.name, {
+                maid,
+                polId: effectivePolId,
+                bufferSize: pdfBuffer.length,
+            });
+
+            return {
+                isSuccess: true,
+                message: 'Ecard retrieved successfully.',
+                data: 'data:application/pdf;base64,' + pdfBuffer.toString('base64'),
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching ecard view after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, maid, effectivePolId },
+            );
+            return { isSuccess: false, message: 'Internal server error fetching ecard' };
+        }
+    }
 }

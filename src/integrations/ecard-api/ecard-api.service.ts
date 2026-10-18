@@ -1,10 +1,14 @@
 import { Injectable } from '@nestjs/common';
+import { HttpService } from '../../../common/http/http.service.js';
 import { LoggingService } from '../../../common/logging/logging.service.js';
 import { CoverageLetterRequest, EcardPdfRequest } from './ecard-api.types.js';
 
 @Injectable()
 export class EcardApiService {
-  constructor(private readonly logger: LoggingService) {}
+  constructor(
+    private readonly httpService: HttpService,
+    private readonly logger: LoggingService,
+  ) {}
 
   async makeEcardRestCall<T = any>(
     path: string,
@@ -13,51 +17,61 @@ export class EcardApiService {
     accessKey: string,
     tenantId: string,
   ): Promise<T> {
+    if (!baseUrl?.trim()) {
+      this.logger.error('Ecard API base URL is not configured', undefined, EcardApiService.name, {
+        path,
+        tenantId,
+      });
+      throw new Error('Ecard API base URL is not configured.');
+    }
+
     const cleanUrl = baseUrl.replace(/\/+$/, '');
     const cleanPath = path.replace(/^\/+/, '');
-    const url = `${cleanUrl}/${cleanPath}`;
+    const endpoint = `${cleanUrl}/${cleanPath}`;
 
-    this.logger.debug(`Making ecard API call to: ${url}`, EcardApiService.name, {
-      url,
+    this.logger.debug(`Making ecard API call to: ${endpoint}`, EcardApiService.name, {
+      endpoint,
+      path: cleanPath,
       tenantId,
+      hasPayload: Boolean(body),
     });
 
     try {
-      const response = await fetch(url, {
-        method: 'POST',
+      const response = await this.httpService.post<any>(endpoint, body, {
+        tenantId,
         headers: {
           'Content-Type': 'application/json',
           'X-CA-SHARED-KEY': accessKey,
           'Payer': tenantId,
           'LoadArchive': 'false',
         },
-        body: JSON.stringify(body),
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        this.logger.error(
-          `Ecard API call failed with status ${response.status}: ${errorText}`,
-          undefined,
-          EcardApiService.name,
-          { url, tenantId, status: response.status },
-        );
-        throw new Error(`Ecard API call failed: ${response.statusText}`);
+      if (Buffer.isBuffer(response)) {
+        this.logger.debug(`Ecard API returned binary PDF stream of size ${response.length} bytes`, EcardApiService.name, {
+          endpoint,
+          tenantId,
+          byteLength: response.length,
+        });
+        return { rawPdfBuffer: response } as unknown as T;
       }
 
-      const contentType = response.headers.get('content-type') || '';
-      if (contentType.includes('application/pdf') || contentType.includes('octet-stream')) {
-        const buffer = Buffer.from(await response.arrayBuffer());
-        return { rawPdfBuffer: buffer } as unknown as T;
-      }
+      this.logger.debug('Ecard API response received successfully', EcardApiService.name, {
+        endpoint,
+        tenantId,
+        hasData: Boolean(response),
+      });
 
-      return (await response.json()) as T;
+      return response as T;
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
-      this.logger.warn(`makeEcardRestCall error: ${err.message}`, EcardApiService.name, {
-        url,
-      });
-      throw error;
+      this.logger.error(
+        `makeEcardRestCall error: ${err.message}`,
+        err.stack,
+        EcardApiService.name,
+        { endpoint, tenantId, path: cleanPath },
+      );
+      throw err;
     }
   }
 
@@ -67,7 +81,32 @@ export class EcardApiService {
     accessKey: string,
     tenantId: string,
   ): Promise<any> {
-    return this.makeEcardRestCall<any>('/Test/downloadECard', request, baseUrl, accessKey, tenantId);
+    const payload: Record<string, any> = {
+      printRequest: {
+        executionMode: request?.printRequest?.executionMode || 'Single',
+        identifierType: request?.printRequest?.identifierType || 'MemberId',
+        identifierValue: String(request?.printRequest?.identifierValue || request?.maid || ''),
+        printPattern: request?.printRequest?.printPattern || request?.printPattern || 'Family',
+      },
+      isPasswordEnabled: Boolean(request?.isPasswordEnabled ?? false),
+      printExpiredPolicy: Boolean(request?.printExpiredPolicy ?? false),
+      policyId: Number(request?.policyId || 0),
+      insurerId: String(request?.insurerId ?? '10'),
+      dbType: request?.dbType || 'MA',
+      outputType: request?.outputType || 'PDFByteStream',
+    };
+
+    this.logger.debug('Fetching ecard PDF', EcardApiService.name, {
+      baseUrl,
+      tenantId,
+      policyId: payload.policyId,
+      memberId: payload.printRequest.identifierValue,
+      printPattern: payload.printRequest.printPattern,
+      insurerId: payload.insurerId,
+      payload,
+    });
+
+    return this.makeEcardRestCall<any>('/Test/downloadECard', payload, baseUrl, accessKey, tenantId);
   }
 
   async getCoverageLetter(
@@ -76,6 +115,16 @@ export class EcardApiService {
     accessKey: string,
     tenantId: string,
   ): Promise<any> {
+    this.logger.debug('Fetching coverage letter', EcardApiService.name, {
+      baseUrl,
+      tenantId,
+      memberPolicyId: request?.MemberPolicyId,
+      pribenefId: request?.PribenefId,
+      benefId: request?.BenefId,
+      dbType: request?.DbType,
+    });
+
     return this.makeEcardRestCall<any>('/mwc/printCoverageLetter', request, baseUrl, accessKey, tenantId);
   }
 }
+

@@ -7,15 +7,15 @@ export interface EcardPrintRequest {
 
 export interface EcardPdfRequest {
   printRequest: EcardPrintRequest;
-  printPattern: string;
-  policyId: number;
-  insurerId: number;
-  corporateId: number;
-  policySubId: number;
-  outputType: string;
-  dbType: string;
   isPasswordEnabled: boolean;
   printExpiredPolicy: boolean;
+  policyId: number;
+  insurerId: number | string;
+  dbType: string;
+  outputType: string;
+  corporateId?: number;
+  policySubId?: number;
+  printPattern?: string;
 }
 
 export interface CoverageLetterRequest {
