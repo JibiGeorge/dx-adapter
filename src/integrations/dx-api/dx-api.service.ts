@@ -365,4 +365,58 @@ export class DXApiService {
             throw err;
         }
     }
+
+    async getEnrollmentTemplate(
+        baseUrl: string,
+        apiKey: string,
+        mappingId: number,
+        role: string,
+    ): Promise<{ buffer: Buffer; contentType: string; fileName: string }> {
+        if (!baseUrl) {
+            this.logger.error('Enrollment API base URL is not configured', undefined, DXApiService.name);
+            throw new Error('Enrollment API URL is not configured.');
+        }
+
+        const cleanUrl = baseUrl.replace(/\/+$/, '');
+        const endpoint = `${cleanUrl}/api/enrolment-meta/${mappingId}/sample-csv?role=${encodeURIComponent(role)}`;
+
+        this.logger.debug('Downloading enrollment template', DXApiService.name, {
+            endpoint,
+            mappingId,
+            role,
+        });
+
+        try {
+            const res = await fetch(endpoint, {
+                headers: {
+                    'X-API-Key': apiKey,
+                },
+            });
+
+            if (!res.ok) {
+                const errText = await res.text();
+                this.logger.warn(`Enrollment template fetch failed: HTTP ${res.status} - ${errText}`, DXApiService.name);
+                throw new Error(`Template not available: HTTP ${res.status}`);
+            }
+
+            const contentType = res.headers.get('content-type') || 'application/octet-stream';
+            const contentDisposition = res.headers.get('content-disposition') || '';
+            const fileNameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+            const fileName = fileNameMatch ? fileNameMatch[1].replace(/['"]/g, '') : 'sample-template.csv';
+
+            const arrayBuffer = await res.arrayBuffer();
+            const buffer = Buffer.from(arrayBuffer);
+
+            return { buffer, contentType, fileName };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+                `Error downloading enrollment template: ${err.message}`,
+                err.stack,
+                DXApiService.name,
+                { endpoint, mappingId },
+            );
+            throw err;
+        }
+    }
 }

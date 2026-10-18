@@ -623,4 +623,35 @@ export class HRController {
 
         return this.hrService.getEnrollmentMappings(tenantId);
     }
+
+    @Get('enrollment-template')
+    async getEnrollmentTemplate(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Query('polId') polId: string,
+        @Query('mappingId') mappingId: string,
+        @Query('policyType') policyType: string,
+        @Res() res: Response,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const result = await this.hrService.getEnrollmentTemplate(tenantId, user, {
+            polId,
+            mappingId,
+            policyType,
+        });
+
+        if (!result.success) {
+            return res.status(result.status || 500).json({ error: result.error });
+        }
+
+        res.set({
+            'Content-Type': result.contentType,
+            'Content-Disposition': `attachment; filename="${result.fileName}"`,
+        });
+
+        return res.send(result.buffer);
+    }
 }

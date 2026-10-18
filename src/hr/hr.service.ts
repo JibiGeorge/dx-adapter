@@ -5373,4 +5373,90 @@ export class HRService {
             return { error: 'Internal server error fetching mappings' };
         }
     }
+
+    async getEnrollmentTemplate(
+        tenantId: string,
+        user: UserSessionPayload,
+        query: { polId?: string; mappingId?: string; policyType?: string },
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const enrollmentApiUrl = tenantConfig?.config?.dataexchange?.api || '';
+            const enrollmentApiKey = tenantConfig?.config?.dataexchange?.key || '';
+
+            if (!enrollmentApiUrl) {
+                this.logger.error('Enrollment API URL not configured', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { error: 'Enrollment API URL not configured', status: 500 };
+            }
+
+            const { polId, mappingId, policyType } = query || {};
+            let resolvedMappingId: number | null = mappingId ? Number(mappingId) : null;
+
+            if (!resolvedMappingId) {
+                const metaData: any = await this.dxApiService.getEnrollmentMeta(
+                    enrollmentApiUrl,
+                    enrollmentApiKey,
+                );
+                const mappings: any[] = metaData?.mappings || [];
+
+                // 1. Match by policy_type
+                if (policyType) {
+                    const typeMatch = mappings.find(
+                        (m: any) =>
+                            m?.is_enabled !== false &&
+                            m?.policy_type?.toLowerCase() === String(policyType).toLowerCase(),
+                    );
+                    if (typeMatch) resolvedMappingId = typeMatch.id;
+                }
+
+                // 2. Match by pol_id
+                if (!resolvedMappingId && polId) {
+                    const polMatch = mappings.find((m: any) => m?.pol_id === Number(polId));
+                    if (polMatch) resolvedMappingId = polMatch.id;
+                }
+
+                // 3. First enabled
+                if (!resolvedMappingId) {
+                    const first = mappings.find((m: any) => m?.is_enabled !== false);
+                    if (first) resolvedMappingId = first.id;
+                }
+            }
+
+            if (!resolvedMappingId) {
+                return { error: 'Could not resolve enrollment template mapping', status: 404 };
+            }
+
+            const role = (user as any)?.activePortal === 'broker' ? 'broker' : 'hr';
+            const templateResult = await this.dxApiService.getEnrollmentTemplate(
+                enrollmentApiUrl,
+                enrollmentApiKey,
+                resolvedMappingId,
+                role,
+            );
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Enrollment template downloaded in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, mappingId: resolvedMappingId, role },
+            );
+
+            return { success: true, ...templateResult };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error downloading enrollment template after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId },
+            );
+            return { error: 'Internal server error downloading template', status: 500 };
+        }
+    }
 }
