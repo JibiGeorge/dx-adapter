@@ -2187,4 +2187,96 @@ export class HRService {
             return { success: false, message: 'Unable to load claims. Please try again.', claims: [], total: 0 };
         }
     }
+
+    async getClaimDetailByRef(
+        tenantId: string,
+        user: UserSessionPayload,
+        query: {
+            clmReferenceNo: string;
+        },
+    ) {
+        const startedAt = Date.now();
+        const normalizedTenantId = String(tenantId || '').trim().toUpperCase();
+        const tenantConfig = this.tenantService.getFullTenantById(normalizedTenantId);
+
+        if (!tenantConfig) {
+            throw new BadRequestException('Invalid tenant-id header.');
+        }
+        try {
+            const claimRefNo = String(query.clmReferenceNo || '').trim();
+            if (!claimRefNo) {
+                return { success: false, error: 'Missing claim reference number.' };
+            }
+
+            const url = (await tenantConfig).config.dataexchange.api;
+            const key = (await tenantConfig).config.dataexchange.key;
+            if (!url) {
+                return { success: false, error: 'Missing dataexchange.api configuration.' };
+            }
+
+            const response = await this.dxApiService.claimDetailsByRefNo(url, key, claimRefNo)
+
+            const claimDetails = response?.claimDetailsView || response?.ClaimDetailsView;
+
+            if (!claimDetails) {
+                return { success: false, message: 'No detail found' };
+            }
+
+            const fmtIso = (v: any) => {
+                if (!v) return '--';
+                const d = new Date(v);
+                return isNaN(d.getTime()) ? String(v) : formatDateDDMMYYYY(d);
+            };
+
+            const auditTrail = ((claimDetails.claimAuditDetails?.length ? claimDetails.claimAuditDetails : claimDetails.auditTrail) || [])
+                .map((a: any) => ({
+                    claimStatus: a.claimStatus || a.ClaimStatus || a.status || '--',
+                    claimAuditTime: a.claimAuditTime ? (isNaN(new Date(a.claimAuditTime).getTime()) ? String(a.claimAuditTime) : new Date(a.claimAuditTime).toLocaleString('en-GB')) : '--',
+                    remarks: a.remarks || a.Remarks || '--',
+                }));
+
+            const claimDetailsView = {
+                claimReferenceNo: claimDetails.claimReferenceNo || claimRefNo,
+                hospName: claimDetails.hospName || claimDetails.hospitalname || '--',
+                clmDOA: fmtIso(claimDetails.clmDOA),
+                clmDOD: fmtIso(claimDetails.clmDOD),
+                claimAuditDetails: auditTrail,
+                statusName: claimDetails.statusName || '--',
+                clmTypeDesc: claimDetails.clmTypeDesc || '--',
+                clmAmount: Number(claimDetails.clmAmount || 0),
+                approvedAmount: Number(claimDetails.clmApprovedAmt || 0),
+                policyNumber: claimDetails.policyNumber || '--',
+                polHolderName: claimDetails.polHolderName || '--',
+                benefName: claimDetails.benefName || '--',
+                employeeId: claimDetails.priBenefEmpCode || '--',
+            };
+
+            return {
+                success: true,
+                claimDetailsView,
+                detail: {
+                    ...claimDetailsView,
+                    hospitalName: claimDetailsView.hospName,
+                    doa: claimDetailsView.clmDOA,
+                    dod: claimDetailsView.clmDOD,
+                    claimStatus: claimDetailsView.statusName,
+                    claimType: claimDetailsView.clmTypeDesc,
+                    claimAmount: claimDetailsView.clmAmount,
+                    approvedAmount: claimDetailsView.approvedAmount,
+                    auditTrail,
+                },
+            }
+
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching claim detail after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, query },
+            );
+            return { success: false, error: 'Unable to load claim detail. Please try again.' };
+        }
+    }
 }

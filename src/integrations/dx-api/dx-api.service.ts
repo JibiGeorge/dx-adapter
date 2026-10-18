@@ -200,4 +200,53 @@ export class DXApiService {
         this.logger.debug(`NonCMS claims total retrieved: ${allClaims.length} claims`, DXApiService.name);
         return { isSuccess: true, claims: allClaims };
     }
+
+    async claimDetailsByRefNo(baseUrl: string, accessKey: string, claimReferenceNumber: string) {
+        if (!baseUrl) {
+            this.logger.error('DataExchange API base URL is not configured for claimDetailsByRefNo', undefined, DXApiService.name);
+            return { success: false, message: 'Could not load claim details.' };
+        }
+
+        const cleanUrl = baseUrl.replace(/\/+$/, '');
+        const endpoint = `${cleanUrl}/memberportal/search/claimDetails`;
+
+        this.logger.debug(
+            `Calling NonCMS claims endpoint with ${claimReferenceNumber}`,
+            DXApiService.name,
+            { endpoint, claimReferenceNumber },
+        );
+
+        try {
+            const response = await this.httpService.post<any>(
+                endpoint,
+                { clmReferenceNo: claimReferenceNumber },
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-API-Key': accessKey,
+                    },
+                },
+            );
+
+            if (response && response.isSuccess === false) {
+                this.logger.warn(
+                    `NonCMS claims endpoint with ${claimReferenceNumber} returned unsuccessful`,
+                    DXApiService.name,
+                    { endpoint, claimReferenceNumber, response },
+                );
+                return { success: false, message: 'Could not load claim details.' }
+            }
+
+            return response
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+                `NonCMS claims endpoint with ${claimReferenceNumber} request error: ${err.message}`,
+                err.stack,
+                DXApiService.name,
+                { endpoint, claimReferenceNumber },
+            );
+            return { success: false, message: 'Could not load claim details.' };
+        }
+    }
 }

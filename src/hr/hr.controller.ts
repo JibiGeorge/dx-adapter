@@ -216,4 +216,20 @@ export class HRController {
 
         return this.hrService.getClaims(tenantId, user, query, host);
     }
+
+    @Get('claim-detail-by-ref')
+    async getClaimDetailByRef(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Query() query: {
+            clmReferenceNo: string;
+        },
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getClaimDetailByRef(tenantId, user, query);
+    }
+
 }
