@@ -507,4 +507,16 @@ export class HRController {
 
         return this.hrService.getHospitalSpecialities(tenantId);
     }
+
+    @Get('web-mis')
+    async getWebMis(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getWebMis(tenantId, user);
+    }
 }

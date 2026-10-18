@@ -4607,4 +4607,40 @@ export class HRService {
             return { success: true, specialities: [] };
         }
     }
+
+    async getWebMis(
+        tenantId: string,
+        user: UserSessionPayload,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const sessionCorpId = Number((user as any)?.corpId || user?.providerCorpId || 0);
+
+        const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+        const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+        let corpId = sessionCorpId;
+        if (!corpId || corpId <= 0) {
+            const corpIds = await this.claimService.resolveFallbackCorpIds(
+                normalizedTenantId,
+                user,
+                tenantConfig,
+                isLawton,
+            );
+            corpId = corpIds[0] || sessionCorpId;
+        }
+
+        const userName = user?.loginName || user?.userName || '';
+
+        this.logger.debug('Returning web-mis config', HRService.name, {
+            tenantId: normalizedTenantId,
+            corporateId: corpId,
+            userName,
+        });
+
+        return {
+            success: true,
+            corporateId: corpId,
+            userName,
+        };
+    }
 }
