@@ -4643,4 +4643,87 @@ export class HRService {
             userName,
         };
     }
+
+    async getReports(
+        tenantId: string,
+        user: UserSessionPayload,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+            const corpIds = await this.claimService.resolveFallbackCorpIds(
+                normalizedTenantId,
+                user,
+                tenantConfig,
+                isLawton,
+            );
+            const sessionCorpId = Number((user as any)?.corpId || user?.providerCorpId || 0);
+            const corpId = corpIds[0] || sessionCorpId;
+
+            let policyNos = '';
+            try {
+
+                const claimApis = tenantConfig.config?.claimApis;
+                const claimApiUrl = (claimApis?.v2 || claimApis?.v1 || '').replace(/\/+$/, '');
+                const claimApiKey = claimApis?.v2Key || '';
+
+                const policiesRes = await this.claimService.searchPolicies(corpIds, claimApiUrl, claimApiKey, normalizedTenantId, false);
+                const policies: any[] = policiesRes?.policyDetails || policiesRes?.PolicyHeaders || [];
+                policyNos = policies
+                    .map((p: any) => p.polNo ?? p.PolicyNumber)
+                    .filter(Boolean)
+                    .join(',');
+            } catch (err: any) {
+                this.logger.warn(
+                    `Failed to search policies for reports (${err?.message}), continuing with empty policyNos`,
+                    HRService.name,
+                    { tenantId: normalizedTenantId, corpIds },
+                );
+            }
+
+            // Allowed claim types (mirrors C# allowedClaimTypes list)
+            const claimTypes = [
+                { id: 1, name: 'Reimbursement' },
+                { id: 2, name: 'Cashless' },
+                { id: 3, name: 'OPD/Domiciliary' },
+            ];
+
+            const dashboards = tenantConfig?.config?.additionalConfigs?.hrDashboards || [];
+            const brokerId = Number((user as any)?.brokerId || 0);
+            const departmentId = (user as any)?.departmentId || '';
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Reports loaded successfully in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, corpId, policyNosCount: policyNos ? policyNos.split(',').length : 0 },
+            );
+
+            return {
+                success: true,
+                corpId,
+                brokerId,
+                policyNos,
+                departmentId,
+                dashboards,
+                claimTypes,
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error loading HR reports after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            return {
+                error: 'Internal server error loading reports',
+            };
+        }
+    }
 }

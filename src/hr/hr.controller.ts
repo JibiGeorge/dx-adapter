@@ -519,4 +519,16 @@ export class HRController {
 
         return this.hrService.getWebMis(tenantId, user);
     }
+
+    @Get('reports')
+    async getReports(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getReports(tenantId, user);
+    }
 }
