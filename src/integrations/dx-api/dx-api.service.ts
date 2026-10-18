@@ -126,4 +126,78 @@ export class DXApiService {
             };
         }
     }
+
+    async searchNonCMSClaims(maids: number[], baseUrl: string, accessKey: string) {
+        if (!maids || maids.length === 0) {
+            return { isSuccess: true, claims: [] };
+        }
+
+        if (!baseUrl) {
+            this.logger.error('DataExchange API base URL is not configured for searchNonCMSClaims', undefined, DXApiService.name);
+            return { isSuccess: false, claims: [] };
+        }
+
+        // Batch MAIDs into chunks of 200 to prevent hitting API payload / SQL limits
+        const BATCH_SIZE = 200;
+        const chunks: number[][] = [];
+        for (let i = 0; i < maids.length; i += BATCH_SIZE) {
+            chunks.push(maids.slice(i, i + BATCH_SIZE));
+        }
+
+        const cleanUrl = baseUrl.replace(/\/+$/, '');
+        const endpoint = `${cleanUrl}/memberportal/search/noncmsclaim/claims/`;
+
+        this.logger.debug(
+            `Calling NonCMS claims endpoint with ${maids.length} MAIDs in ${chunks.length} batches`,
+            DXApiService.name,
+            { endpoint, totalMaids: maids.length, batches: chunks.length },
+        );
+
+        const results = await Promise.all(
+            chunks.map(async (chunk, idx) => {
+                try {
+                    const response = await this.httpService.post<any>(
+                        endpoint,
+                        { MaIds: chunk, IsDHSMember: false },
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-API-Key': accessKey,
+                            },
+                        },
+                    );
+
+                    if (response && response.isSuccess === false) {
+                        this.logger.warn(
+                            `NonCMS claims batch ${idx + 1} returned unsuccessful`,
+                            DXApiService.name,
+                            { batch: idx + 1, response },
+                        );
+                        return [];
+                    }
+
+                    return (response?.claims || response?.Claims || []) as any[];
+                } catch (err) {
+                    const error = err instanceof Error ? err : new Error(String(err));
+                    this.logger.error(
+                        `NonCMS claims batch ${idx + 1} request error: ${error.message}`,
+                        error.stack,
+                        DXApiService.name,
+                        { batch: idx + 1, endpoint },
+                    );
+                    return [];
+                }
+            })
+        );
+
+        const allClaims: any[] = [];
+        for (const batch of results) {
+            for (const claim of batch) {
+                allClaims.push(claim);
+            }
+        }
+
+        this.logger.debug(`NonCMS claims total retrieved: ${allClaims.length} claims`, DXApiService.name);
+        return { isSuccess: true, claims: allClaims };
+    }
 }

@@ -49,6 +49,7 @@ export class TenantRepository {
 
       config: {
         corpId: doc.config?.corpId ?? 0,
+        macpDb: doc.config.macpDb ?? '',
         app: {
           name: doc.config?.app?.name ?? '',
           url: doc.config?.app?.url ?? '',

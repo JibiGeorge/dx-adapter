@@ -12,6 +12,7 @@ import { UpdateBeneficiaryDetailsDto } from "./dto/beneficiary.dto.js";
 import { BrokerService } from "../broker/broker.service.js";
 import { SqlServerService } from "../database/sql-server.service.js";
 import { DXApiService } from "../integrations/dx-api/dx-api.service.js";
+import { TENANTS } from "../../utils/tentant-helper.js";
 
 interface PolicyBeneficiariesParams {
     policyNo: string;
@@ -240,7 +241,7 @@ export class HRService {
                 this.claimService.searchClaims(
                     claimApiUrl || '',
                     tenantConfig,
-                    corpIds,
+                    { CorporateIds: corpIds },
                     requestedRole,
                 ),
             ]);
@@ -1851,6 +1852,339 @@ export class HRService {
                 success: false,
                 message: 'Unable to update beneficiary details. Please try again.',
             };
+        }
+    }
+
+    async getClaims(tenantId: string, user: UserSessionPayload, query: any, host: string): Promise<any> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+        const normalizedHost = (host || '').toLowerCase();
+        const corpIdFilter = Number(query?.corpId) || 0;
+        const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(normalizedTenantId);
+
+        if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            throw new InternalServerErrorException('Tenant not found');
+        }
+
+        const corpIds = corpIdFilter > 0 ? [corpIdFilter] : await this.brokerService.resolveBrokerCorpIds(user, tenantConfig, normalizedHost);
+        const { byClaimNo, byEmpCode, byEmpName, policyNo, polNo, planType, claimType, showAll } = query || {};
+        const isPast = String(claimType || '').toLowerCase() === 'past';
+        const isAll = String(claimType || '').toLowerCase() === 'all';
+
+        const claimIdNum = byClaimNo ? Number(byClaimNo) : 0;
+        const hasClaimNo = claimIdNum > 0;
+        const hasEmpCode = !!(byEmpCode && String(byEmpCode).trim());
+        const hasEmpName = !!(byEmpName && String(byEmpName).trim());
+        const targetPolNo = String(policyNo || polNo || '').trim();
+
+        this.logger.debug('Fetching claims', HRService.name, {
+            tenantId: normalizedTenantId,
+            corpIds,
+            claimType,
+            hasClaimNo,
+            hasEmpCode,
+            hasEmpName,
+            targetPolNo,
+        });
+
+        let claimsList: any[] = [];
+
+        // Helper to query database claims from tblPc_Employees with tokenized name support
+        const queryPastDbClaims = async (): Promise<any[]> => {
+            const dbConfig = tenantConfig.config?.database;
+            const macpDb = tenantConfig.config?.macpDb || 'MACP';
+
+            if (!dbConfig) {
+                this.logger.warn('Database config not available for queryPastDbClaims', HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return [];
+            }
+
+            try {
+                const pool = await this.sqlServerService.getPool(dbConfig);
+                const req2 = pool.request();
+                let whereClause = '';
+                if (corpIds.length > 0) {
+                    const corpParams = corpIds.map((id, i) => {
+                        req2.input(`PMCorpId${i}`, id);
+                        return `@PMCorpId${i}`;
+                    });
+                    whereClause = `PMCorpId IN (${corpParams.join(', ')})`;
+                } else {
+                    whereClause = '1=1';
+                }
+
+                if (byClaimNo) {
+                    whereClause += ' AND ClaimID = @ClaimID';
+                    req2.input('ClaimID', String(byClaimNo));
+                } else if (byEmpCode) {
+                    whereClause += ' AND EmpId = @EmpId';
+                    req2.input('EmpId', String(byEmpCode));
+                }
+
+                if (byEmpName) {
+                    const terms = String(byEmpName).trim().split(/\s+/).filter(Boolean);
+                    if (terms.length > 0) {
+                        const nameConditions = terms.map((term, idx) => {
+                            req2.input(`EmpNameTerm${idx}`, `%${term}%`);
+                            return `(EmpName LIKE @EmpNameTerm${idx} OR NameOfPatient LIKE @EmpNameTerm${idx})`;
+                        });
+                        whereClause += ` AND (${nameConditions.join(' AND ')})`;
+                    }
+                }
+
+                const queryStr = `SELECT * FROM ${macpDb}.dbo.tblPc_Employees WITH(NOLOCK) WHERE ${whereClause}`;
+                const dbRes = await req2.query(queryStr);
+
+                return (dbRes.recordset || []).map((c: any) => {
+                    const rawName = String(c.EmpName || '').trim();
+                    const nameParts = rawName.split(/\s+/).filter(Boolean);
+                    const bFirst = nameParts.length > 1 ? nameParts.slice(0, -1).join(' ') : (nameParts[0] || '');
+                    const bLast = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+
+                    return {
+                        actualClaimId: 0,
+                        claimId: c.ClaimID || c.TPAID || '',
+                        employeeName: bFirst || rawName,
+                        benefFirstName: bFirst || rawName,
+                        benefLastName: bLast,
+                        patientName: c.NameOfPatient || c.EmpName || '',
+                        empCode: c.EmpId || '',
+                        hospName: c.Name_Of_Hospital || '',
+                        claimType: c.Type_Of_Claims || 'Reimbursement',
+                        claimAmount: parseFloat(c.Total_ClaimAmount || '0') || 0,
+                        approvedAmount: Number(c.ApprovedAmount ?? c.Approved_Amount ?? 0),
+                        statusName: c.Claim_Status || '',
+                        policyNumber: c.PolNo || '',
+                        doa: c.Date_Of_Admission || null,
+                        dod: c.Date_Of_Discharge || null,
+                        dbType: 'MA',
+                        priBenefMaid: Number(c.MA_benefMediAssistid || 0),
+                        isPastClaim: true,
+                    };
+                });
+            } catch (err) {
+                const error = err instanceof Error ? err : new Error(String(err));
+                this.logger.warn(`Error querying tblPc_Employees in claims route: ${error.message}`, HRService.name, {
+                    error: error.stack,
+                    tenantId: normalizedTenantId,
+                });
+                return [];
+            }
+        };
+
+        try {
+            if (tenantId === TENANTS.LAWTON && isPast) {
+                claimsList = await queryPastDbClaims();
+            } else if (tenantId === TENANTS.LAWTON) {
+                const claimApiUrl =
+                    tenantConfig.config?.claimApis?.v1?.replace(/\/+$/, '') ||
+                    tenantConfig.config?.claimApis?.v2?.replace(/\/+$/, '');
+
+                if (hasClaimNo) {
+                    const claimsRes = await this.claimService.searchClaims(
+                        claimApiUrl || '',
+                        tenantConfig,
+                        { ClaimIds: [claimIdNum], NONCMSClaimRequired: false },
+                        'hr',
+                    );
+                    const raw = claimsRes?.claimSearchResults || claimsRes?.Claims || [];
+                    claimsList = raw.map((c: any) => {
+                        const rawName = String(c.beneficiaryName || c.pribenefDetails?.priBeneficiaryName || '').trim();
+                        const nameParts = rawName.split(/\s+/).filter(Boolean);
+                        const bFirst = c.beneficiaryName || (nameParts.length > 1 ? nameParts.slice(0, -1).join(' ') : nameParts[0]);
+                        const bLast = c.benefLastName || (nameParts.length > 1 ? nameParts[nameParts.length - 1] : '');
+
+                        return {
+                            actualClaimId: c.claimId || 0,
+                            claimId: c.claimReferenceNumber || String(c.claimId) || '',
+                            employeeName: bFirst,
+                            benefFirstName: bFirst,
+                            benefLastName: bLast,
+                            patientName: c.beneficiaryName || '',
+                            empCode: c.pribenefDetails?.priBenefEmpCode || '',
+                            hospName: c.hospName || '',
+                            claimType: c.claimType || 'Reimbursement',
+                            claimAmount: Number(c.claimedAmt || 0),
+                            approvedAmount: Number(c.approvedAmt || 0),
+                            statusName: c.currentClaimStatus || '',
+                            policyNumber: c.policyDetails?.polInsurerPolNo || c.policyDetails?.polNo || '',
+                            doa: formatDateDDMMYYYY(parseDotNetDate(c.claimDOA)) || null,
+                            dod: formatDateDDMMYYYY(parseDotNetDate(c.claimDOD)) || null,
+                            dbType: c.dbType || 'MA',
+                            priBenefMaid: Number(c.maid || 0),
+                            plannedHospId: Number(c.hospitalId || 0),
+                            isPastClaim: false,
+                        };
+                    });
+                } else {
+                    const maids = await this.claimService.getAllMaidsForCorps(
+                        tenantConfig.config?.claimApis?.v2,
+                        tenantConfig.config?.claimApis?.v2Key,
+                        normalizedTenantId,
+                        corpIds,
+                        hasEmpName ? String(byEmpName) : undefined,
+                        hasEmpCode ? String(byEmpCode) : undefined,
+                    );
+
+                    if (maids.length > 0) {
+                        const nonCmsRes = await this.dxApiService.searchNonCMSClaims(
+                            maids,
+                            tenantConfig.config?.dataexchange?.api,
+                            tenantConfig.config?.dataexchange?.key,
+                        );
+
+                        const rawClaims: any[] = nonCmsRes?.claims || [];
+
+                        const filtered = rawClaims.filter((c: any) => {
+                            if (hasEmpName) {
+                                const searchTerms = String(byEmpName).toLowerCase().trim().split(/\s+/).filter(Boolean);
+                                const firstName = String(c.benefName || '').toLowerCase();
+                                const lastName = String(c.benefLastName || '').toLowerCase();
+                                const empName = String(c.employeeName || '').toLowerCase();
+                                const patientName = String(c.patientName || '').toLowerCase();
+                                const fullCombined = `${firstName} ${lastName}`.trim();
+                                const reverseCombined = `${lastName} ${firstName}`.trim();
+
+                                const matchesAll = searchTerms.every((term) =>
+                                    firstName.includes(term) ||
+                                    lastName.includes(term) ||
+                                    empName.includes(term) ||
+                                    patientName.includes(term) ||
+                                    fullCombined.includes(term) ||
+                                    reverseCombined.includes(term)
+                                );
+                                if (!matchesAll) return false;
+                            }
+                            if (hasEmpCode) {
+                                const code = String(byEmpCode).toLowerCase().trim();
+                                const ec = String(c.employeeId || '').toLowerCase();
+                                if (!ec.includes(code)) return false;
+                            }
+                            return true;
+                        });
+
+                        const STATUS_MAP: Record<number, string> = {
+                            1: 'Received', 2: 'In Process', 3: 'Approved', 4: 'Settled',
+                            5: 'Rejected', 6: 'On Hold', 7: 'File To Insurer', 8: 'Closed',
+                            9: 'Query', 10: 'Withdrawn', 11: 'Cashless Approved',
+                        };
+
+                        claimsList = filtered.map((c: any) => {
+                            const nameParts = String(c.benefName || c.employeeName || '').trim().split(/\s+/).filter(Boolean);
+                            const bFirst = c.benefName || (nameParts.length > 1 ? nameParts.slice(0, -1).join(' ') : (nameParts[0] || ''));
+                            const bLast = c.benefLastName || (nameParts.length > 1 ? nameParts[nameParts.length - 1] : '');
+
+                            return {
+                                actualClaimId: Number(c.actualClaimId || c.claimId || 0),
+                                claimId: c.claimReferenceNo || String(c.claimId || ''),
+                                employeeName: bFirst,
+                                benefFirstName: bFirst,
+                                benefLastName: bLast,
+                                patientName: c.benefName || c.patientName || '',
+                                empCode: c.employeeId || '',
+                                hospName: '',
+                                claimType: c.claimType || 'Reimbursement',
+                                claimAmount: Number(c.clmAmount || 0),
+                                approvedAmount: Number(c.clmApprovedAmt || 0),
+                                statusName: STATUS_MAP[Number(c.statusId)] || String(c.statusId || ''),
+                                policyNumber: c.policyNumber || '',
+                                doa: c.doa ? formatDateDDMMYYYY(new Date(c.doa)) : null,
+                                dod: c.dod ? formatDateDDMMYYYY(new Date(c.dod)) : null,
+                                dbType: 'MA',
+                                priBenefMaid: Number(c.priBenefMAID || 0),
+                                plannedHospId: Number(c.plannedHospitalizationId || 0),
+                                isPastClaim: false,
+                            };
+                        });
+                    }
+
+                    if (isAll) {
+                        const dbClaims = await queryPastDbClaims();
+                        const existingIds = new Set(claimsList.map((c) => c.claimId));
+                        for (const dc of dbClaims) {
+                            if (!existingIds.has(dc.claimId)) {
+                                claimsList.push(dc);
+                            }
+                        }
+                    }
+                }
+            } else {
+                const searchRequest: any = { NONCMSClaimRequired: false };
+                if (hasClaimNo) {
+                    searchRequest.ClaimIds = [claimIdNum];
+                } else {
+                    searchRequest.CorporateIds = corpIds;
+                }
+                if (hasEmpCode) searchRequest.BeneficiaryEmployeeCode = String(byEmpCode);
+                if (hasEmpName) searchRequest.BeneficiaryName = String(byEmpName);
+                if (showAll === 'true') searchRequest.ShowallClaims = true;
+
+                const claimApiUrl =
+                    tenantConfig.config?.claimApis?.v1?.replace(/\/+$/, '') ||
+                    tenantConfig.config?.claimApis?.v2?.replace(/\/+$/, '');
+
+                const claimsRes = await this.claimService.searchClaims(
+                    claimApiUrl || '',
+                    tenantConfig,
+                    searchRequest,
+                    'hr',
+                );
+                claimsList = (claimsRes?.Claims || claimsRes?.claimSearchResults || []).map((c: any) => ({
+                    actualClaimId: c.claimId || 0,
+                    claimId: c.claimReferenceNumber || String(c.claimId) || '',
+                    employeeName: c.beneficiaryName || c.pribenefDetails?.priBeneficiaryName || '',
+                    benefLastName: c.benefLastName || '',
+                    patientName: c.beneficiaryName || '',
+                    empCode: c.pribenefDetails?.priBenefEmpCode || '',
+                    hospName: c.hospName || '',
+                    claimType: c.claimType || 'Reimbursement',
+                    claimAmount: Number(c.claimedAmt || 0),
+                    approvedAmount: Number(c.approvedAmt || 0),
+                    statusName: c.currentClaimStatus || '',
+                    policyNumber: c.policyDetails?.polInsurerPolNo || '',
+                    doa: formatDateDDMMYYYY(parseDotNetDate(c.claimDOA)) || null,
+                    dod: formatDateDDMMYYYY(parseDotNetDate(c.claimDOD)) || null,
+                    dbType: c.dbType || 'MA',
+                    priBenefMaid: Number(c.maid || 0),
+                    plannedHospId: Number(c.hospitalId || 0),
+                    isPastClaim: false,
+                }));
+            }
+
+            if (targetPolNo) {
+                const pLower = targetPolNo.toLowerCase();
+                claimsList = claimsList.filter((c: any) => String(c.policyNumber || '').toLowerCase().includes(pLower));
+            }
+            if (planType && String(planType).trim()) {
+                const planLower = String(planType).toLowerCase().trim();
+                claimsList = claimsList.filter((c: any) => !c.planName || String(c.planName).toLowerCase().includes(planLower));
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(`Retrieved ${claimsList.length} claims in ${durationMs}ms`, HRService.name, {
+                tenantId: normalizedTenantId,
+                total: claimsList.length,
+            });
+
+            return { success: true, claims: claimsList, total: claimsList.length };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching claims after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, query },
+            );
+            return { success: false, message: 'Unable to load claims. Please try again.', claims: [], total: 0 };
         }
     }
 }

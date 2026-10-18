@@ -200,4 +200,20 @@ export class HRController {
 
         return this.hrService.updateBeneficiaryDetails(tenantId, user, body);
     }
+
+    @Get('claims')
+    async getClaims(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Headers('host') host: string,
+        @Query() query: {
+            corpId?: string;
+        },
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getClaims(tenantId, user, query, host);
+    }
 }

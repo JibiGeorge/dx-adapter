@@ -78,6 +78,7 @@ export interface TenantAuraHealthConfig {
  */
 export interface TenantInternalConfig {
   corpId: string | number;
+  macpDb: string;
   app: TenantAppConfig;
   auth: TenantAuthConfig;
   services: TenantServicesConfig;

@@ -182,7 +182,7 @@ export class ClaimApiService {
   async searchClaims(
     baseUrl: string,
     tenantConfig: TenantConfigTypes,
-    corporateIds: number[],
+    searchRequest: any,
     role: string,
   ) {
     const cleanUrl = baseUrl.replace(/\/+$/, '');
@@ -203,7 +203,7 @@ export class ClaimApiService {
 
     this.logger.debug('Searching claims', ClaimApiService.name, {
       endpoint,
-      corporateIds,
+      ...searchRequest,
       dnsHostName,
       role,
     });
@@ -211,7 +211,7 @@ export class ClaimApiService {
     const payload = {
       DNSHostName: dnsHostName,
       AllowedTPAIds: allowedTPAIds,
-      CorporateIds: corporateIds,
+      ...searchRequest,
       Range: 100,
       StartIndex: 0,
     };
@@ -377,5 +377,76 @@ export class ClaimApiService {
       );
       throw error;
     }
+  }
+
+  async getAllMaidsForCorps(baseUrl: string, accessKey: string, tenantId: string, corpIds: number[], nameFilter?: string, codeFilter?: string): Promise<number[]> {
+    const PAGE_SIZE = 100;
+    const queries: string[] = [];
+    const allMaids = new Set<number>();
+
+    // Determine search queries: if multi-word name, search with the full name as well as individual tokens
+    if (nameFilter && nameFilter.trim()) {
+      const trimmed = nameFilter.trim();
+      queries.push(trimmed);
+      const tokens = trimmed.split(/\s+/).filter(t => t.length >= 2);
+      if (tokens.length > 1) {
+        // Add the last token (surname) and first token (given name) if distinct
+        const lastToken = tokens[tokens.length - 1];
+        const firstToken = tokens[0];
+        if (!queries.includes(lastToken)) queries.push(lastToken);
+        if (!queries.includes(firstToken)) queries.push(firstToken);
+      }
+    } else {
+      queries.push('');
+    }
+
+    for (const q of queries) {
+      let startIndex = 0;
+      let pageCount = 0;
+      let hasMore = true;
+      const MAX_PAGES = (q || codeFilter) ? 2 : 1;
+
+      while (hasMore && pageCount < MAX_PAGES) {
+        pageCount++;
+        const payload: any = {
+          PolicyCorpIds: corpIds,
+          EmployeeNo: codeFilter || '',
+          BeneficiaryName: q,
+          Range: PAGE_SIZE,
+          StartIndex: startIndex,
+        };
+
+        try {
+          const res = await this.searchBeneficiaries(payload, baseUrl, accessKey, tenantId, false);
+          const benefs: any = res?.BeneficiaryDetails || res?.beneficiaryDetails || [];
+          benefs.forEach((b: any) => {
+            const maid = Number(b.benefMediAssistID || b.BenefMediAssistID || 0);
+            if (maid > 0) allMaids.add(maid);
+          });
+          this.logger.debug(
+            `getAllMaidsForCorps (query="${q}") page StartIndex=${startIndex}: got ${benefs.length} beneficiaries`,
+            ClaimApiService.name,
+          );
+          if (benefs.length < PAGE_SIZE) {
+            hasMore = false;
+          } else {
+            startIndex += PAGE_SIZE;
+          }
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          this.logger.warn(
+            `getAllMaidsForCorps query="${q}" page failed, stopping pagination: ${err.message}`,
+            ClaimApiService.name,
+          );
+          hasMore = false;
+        }
+      }
+    }
+
+    this.logger.debug(
+      `getAllMaidsForCorps: collected ${allMaids.size} unique MAIDs for ${corpIds.length} corps`,
+      ClaimApiService.name,
+    );
+    return Array.from(allMaids);
   }
 }
