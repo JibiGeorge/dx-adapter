@@ -434,4 +434,22 @@ export class HRController {
 
         return res.status(result.statusCode || 500).json({ error: result.error });
     }
+
+    @Get('policy-lives-count')
+    async getPolicyLivesCount(
+        @Headers('x-tenant-id') tenantId: string,
+        @Query('policyId') policyId: string,
+        @Query('startDateMs') startDateMs?: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const polIdNum = Number(policyId);
+        if (!polIdNum) {
+            return { error: 'policyId is required' };
+        }
+
+        return this.hrService.getPolicyLivesCount(tenantId, polIdNum, startDateMs || 0);
+    }
 }

@@ -4210,4 +4210,77 @@ export class HRService {
             return { error: 'Internal server error downloading file', statusCode: 500 };
         }
     }
+
+    async getPolicyLivesCount(
+        tenantId: string,
+        policyId: number | string,
+        startDateMs: number | string,
+    ): Promise<any> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+        const polIdNum = Number(policyId);
+        const startMsNum = Number(startDateMs || 0);
+
+        if (!polIdNum || polIdNum <= 0) {
+            return { error: 'policyId is required' };
+        }
+
+        this.logger.debug(
+            `Fetching policy lives count for policyId: ${polIdNum}, startDateMs: ${startMsNum}`,
+            HRService.name,
+            { tenantId: normalizedTenantId, policyId: polIdNum, startDateMs: startMsNum },
+        );
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            if (!tenantConfig) {
+                return { success: false, count: 0, message: 'Tenant not found' };
+            }
+
+            const v2Url = tenantConfig.config?.claimApis?.v2;
+            const v2Key = tenantConfig.config?.claimApis?.v2Key;
+
+            const response = await this.claimService.getPolicyLivesCount(
+                polIdNum,
+                startMsNum,
+                v2Url,
+                v2Key,
+                normalizedTenantId,
+            );
+
+            this.logger.debug(
+                `PolicyLives response for policy ${polIdNum}`,
+                HRService.name,
+                { response },
+            );
+
+            if (response && (response.IsSuccess || response.isSuccess)) {
+                const count = response.NewLives
+                    ? response.NewLives.Lives
+                    : response.newLives
+                        ? response.newLives.lives
+                        : 0;
+
+                const durationMs = Date.now() - startedAt;
+                this.logger.debug(
+                    `Policy lives count for policy ${polIdNum}: ${count} (completed in ${durationMs}ms)`,
+                    HRService.name,
+                );
+
+                return { success: true, count: Number(count) || 0, raw: response };
+            }
+
+            return { success: false, count: 0, raw: response };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `GetPolicyLivesCount error for policyId ${polIdNum} after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, policyId: polIdNum },
+            );
+            return { success: false, count: 0 };
+        }
+    }
 }

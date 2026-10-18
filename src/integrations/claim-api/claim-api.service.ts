@@ -531,4 +531,51 @@ export class ClaimApiService {
       throw err;
     }
   }
+
+  async getPolicyLivesCount(
+    policyId: number,
+    startDateMs: number,
+    baseUrl: string,
+    accessKey: string,
+    tenantId: string,
+  ): Promise<any> {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/api/v2/PolicyLives/`;
+
+    const payload = {
+      policyId,
+      policyStartDate: `/Date(${startDateMs || 0})/`,
+      dbType: 'MA',
+    };
+
+    this.logger.debug(`Calling PolicyLives for policyId: ${policyId}`, ClaimApiService.name, {
+      endpoint,
+      policyId,
+      startDateMs,
+      tenantId,
+    });
+
+    try {
+      const response = await this.httpService.post<any>(endpoint, payload, {
+        tenantId,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CA-SHARED-KEY': accessKey,
+          'Payer': tenantId,
+          'LoadArchive': 'False',
+        },
+      });
+
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `getPolicyLivesCount error: ${err.message}`,
+        err.stack,
+        ClaimApiService.name,
+        { endpoint, policyId },
+      );
+      throw err;
+    }
+  }
 }
