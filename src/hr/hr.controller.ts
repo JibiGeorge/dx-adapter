@@ -802,4 +802,16 @@ export class HRController {
 
         return res.status(200).send(result.buffer);
     }
+
+    @Get('profile')
+    async getProfile(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getProfile(tenantId, user);
+    }
 }

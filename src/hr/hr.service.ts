@@ -11,6 +11,7 @@ import { GetCorpDto } from "./dto/corp.dto.js";
 import { UpdateBeneficiaryDetailsDto } from "./dto/beneficiary.dto.js";
 import { BrokerService } from "../broker/broker.service.js";
 import { SqlServerService } from "../database/sql-server.service.js";
+import { UserProfileRepository } from "../database/repositories/user-profile.repository.js";
 import { DXApiService } from "../integrations/dx-api/dx-api.service.js";
 import { EcardApiService } from "../integrations/ecard-api/ecard-api.service.js";
 import { ProclaimApiService } from "../integrations/proclaim-api/proclaim-api.service.js";
@@ -98,6 +99,7 @@ export class HRService {
         private readonly dxApiService: DXApiService,
         private readonly ecardApiService: EcardApiService,
         private readonly proclaimApiService: ProclaimApiService,
+        private readonly userProfileRepo: UserProfileRepository,
     ) { }
 
     async getHRData(tenantId: string, user: UserSessionPayload): Promise<HRDashboardResponse> {
@@ -5953,6 +5955,60 @@ export class HRService {
                 { tenantId: normalizedTenantId },
             );
             return { error: 'Internal server error downloading enrollment data', status: 500 };
+        }
+    }
+
+    async getProfile(
+        tenantId: string,
+        user: UserSessionPayload,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        try {
+            const portalName = user?.activePortal || 'hr';
+            const loginName = user?.loginName || '';
+
+            const overrides = await this.userProfileRepo.getProfileOverrides(loginName, portalName);
+            const activePic =
+                overrides.profileImgUrl ||
+                (user?.activePortal === portalName ? user?.profileImgUrl : '') ||
+                '';
+
+            const profile = {
+                name: user?.userName || user?.loginName || '',
+                loginName: user?.loginName || '',
+                email: overrides.altEmailId || user?.emailId || '',
+                mobile: overrides.mobile || user?.mobile || '',
+                address: overrides.address || user?.address || '',
+                altMobile: overrides.altMobile || user?.altMobile || '',
+                altEmailId: overrides.altEmailId || user?.altEmailId || '',
+                empCode: user?.empCode || '',
+                profileImgUrl: activePic,
+                brokerCode: (user as any)?.brokerId || '',
+            };
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Profile fetched in ${durationMs}ms for ${loginName}`,
+                HRService.name,
+                { tenantId: normalizedTenantId, loginName, portalName },
+            );
+
+            return {
+                success: true,
+                profile,
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching user profile after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            return { success: false, message: 'Internal server error fetching profile' };
         }
     }
 }

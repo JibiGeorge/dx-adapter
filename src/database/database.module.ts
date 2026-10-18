@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TenantRepository } from './repositories/tenant.repository.js';
+import { UserProfileRepository } from './repositories/user-profile.repository.js';
 
 import { SqlServerService } from './sql-server.service.js';
 
@@ -23,7 +24,7 @@ import { SqlServerService } from './sql-server.service.js';
       inject: [ConfigService],
     }),
   ],
-  providers: [TenantRepository, SqlServerService],
-  exports: [TenantRepository, SqlServerService],
+  providers: [TenantRepository, UserProfileRepository, SqlServerService],
+  exports: [TenantRepository, UserProfileRepository, SqlServerService],
 })
 export class DatabaseModule {}
