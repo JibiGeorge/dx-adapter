@@ -1,4 +1,5 @@
-import { BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, Res, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, Res, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard.js";
 import { HRRoleGuard } from "../../common/guards/hr-role.guard.js";
@@ -6,6 +7,7 @@ import { HRService } from "./hr.service.js";
 import { CurrentUser } from "../../common/decorators/current-user.decorator.js";
 import type { UserSessionPayload } from "../auth/auth.types.js";
 import { HRDashboardResponse, HRStatusResponse } from "./hr.types.js";
+import type { UploadedMulterFile } from "./hr.types.js";
 import { GetCorpDto } from "./dto/corp.dto.js";
 import { UpdateBeneficiaryDetailsDto } from "./dto/beneficiary.dto.js";
 import { DownloadEcardDto, SearchEcardDetailsDto, ViewCoverageLetterDto, ViewEcardDto } from "./dto/ecard.dto.js";
@@ -653,5 +655,27 @@ export class HRController {
         });
 
         return res.send(result.buffer);
+    }
+
+    @Post('enrollment-validate')
+    @UseInterceptors(FileInterceptor('file'))
+    async validateEnrollment(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @UploadedFile() file: UploadedMulterFile,
+        @Body() body: any,
+        @Res() res: Response,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const result = await this.hrService.validateEnrollment(tenantId, user, file, body);
+
+        if (!result.success) {
+            return res.status(result.status || 500).json({ error: result.error, detail: result.detail });
+        }
+
+        return res.status(200).json(result);
     }
 }

@@ -5,7 +5,7 @@ import { ClaimApiService } from "../integrations/claim-api/claim-api.service.js"
 import { TenantConfigTypes } from "../tenant/tenant.types.js";
 import { TenantService } from "../tenant/tenant.service.js";
 import { LAWTON_TENANT_ID } from "../broker/broker.constants.js";
-import { HRDashboardResponse, HRStatusResponse, SubCorpItem } from "./hr.types.js";
+import { HRDashboardResponse, HRStatusResponse, SubCorpItem, UploadedMulterFile } from "./hr.types.js";
 import { formatDateDDMMYYYY, formatDateString, parseDotNetDate } from "../../utils/date-helper.js";
 import { GetCorpDto } from "./dto/corp.dto.js";
 import { UpdateBeneficiaryDetailsDto } from "./dto/beneficiary.dto.js";
@@ -5457,6 +5457,119 @@ export class HRService {
                 { tenantId: normalizedTenantId },
             );
             return { error: 'Internal server error downloading template', status: 500 };
+        }
+    }
+
+    async validateEnrollment(
+        tenantId: string,
+        user: UserSessionPayload,
+        file: UploadedMulterFile,
+        body: any,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        if (!file) {
+            return { error: 'Please upload a CSV file', status: 400 };
+        }
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const enrollmentApiUrl = tenantConfig?.config?.dataexchange?.api || '';
+            const enrollmentApiKey = tenantConfig?.config?.dataexchange?.key || '';
+
+            if (!enrollmentApiUrl) {
+                this.logger.error('Enrollment API URL not configured', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { error: 'Enrollment API URL not configured', status: 500 };
+            }
+
+            const { polId, corpId: corpIdBody, insuranceId, productId, policyType, mappingId } = body || {};
+
+            let resolvedMapping: any = null;
+
+            if (mappingId && Number(mappingId) > 0) {
+                const metaData: any = await this.dxApiService.getEnrollmentMeta(
+                    enrollmentApiUrl,
+                    enrollmentApiKey,
+                );
+                resolvedMapping = (metaData?.mappings || []).find(
+                    (m: any) => m?.id === Number(mappingId),
+                );
+            } else {
+                const metaData: any = await this.dxApiService.getEnrollmentMeta(
+                    enrollmentApiUrl,
+                    enrollmentApiKey,
+                );
+                const mappings: any[] = metaData?.mappings || [];
+                // 1. by policy_type
+                if (policyType) {
+                    resolvedMapping = mappings.find(
+                        (m: any) =>
+                            m?.is_enabled !== false &&
+                            m?.policy_type?.toLowerCase() === String(policyType).toLowerCase(),
+                    );
+                }
+                // 2. by pol_id
+                if (!resolvedMapping && polId) {
+                    resolvedMapping = mappings.find((m: any) => m?.pol_id === Number(polId));
+                }
+                // 3. first enabled
+                if (!resolvedMapping) {
+                    resolvedMapping = mappings.find((m: any) => m?.is_enabled !== false);
+                }
+            }
+
+            const form = new FormData();
+            const blob = new Blob([new Uint8Array(file.buffer)], { type: file.mimetype || 'text/csv' });
+            form.append('file', blob, file.originalname || 'upload.csv');
+
+            if (resolvedMapping) {
+                if (resolvedMapping.pol_id) form.append('pol_id', String(resolvedMapping.pol_id));
+                if (resolvedMapping.crop_id || resolvedMapping.corp_id) {
+                    form.append('corp_id', String(resolvedMapping.crop_id || resolvedMapping.corp_id));
+                }
+                if (resolvedMapping.insurance_id) form.append('insurance_id', String(resolvedMapping.insurance_id));
+                if (resolvedMapping.product_id) form.append('product_id', String(resolvedMapping.product_id));
+                if (resolvedMapping.policy_type) form.append('policy_type', resolvedMapping.policy_type);
+                if (resolvedMapping.id) form.append('mapping_id', String(resolvedMapping.id));
+            } else {
+                if (polId) form.append('pol_id', String(polId));
+                if (corpIdBody) form.append('corp_id', String(corpIdBody));
+                if (insuranceId) form.append('insurance_id', String(insuranceId));
+                if (productId) form.append('product_id', String(productId));
+                if (policyType) form.append('policy_type', String(policyType));
+            }
+
+            const role = (user as any)?.activePortal === 'broker' ? 'broker' : 'hr';
+            form.append('role', role);
+            form.append('uploaded_email_id', user?.emailId || '');
+
+            const validateData = await this.dxApiService.validateEnrollment(
+                enrollmentApiUrl,
+                enrollmentApiKey,
+                form,
+            );
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Enrollment validation completed in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, fileName: file.originalname },
+            );
+
+            return { success: true, data: validateData };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error validating enrollment upload after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId },
+            );
+            return { error: 'Validation failed', detail: err.message, status: 500 };
         }
     }
 }
