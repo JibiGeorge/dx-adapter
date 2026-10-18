@@ -465,4 +465,49 @@ export class DXApiService {
             throw err;
         }
     }
+
+    async getFileLog(
+        baseUrl: string,
+        apiKey: string,
+        params?: URLSearchParams,
+    ): Promise<any> {
+        if (!baseUrl) {
+            this.logger.error('Enrollment API base URL is not configured', undefined, DXApiService.name);
+            throw new Error('Enrollment API URL is not configured.');
+        }
+
+        const cleanUrl = baseUrl.replace(/\/+$/, '');
+        const qs = params && params.toString() ? `?${params.toString()}` : '';
+        const endpoint = `${cleanUrl}/api/file-log${qs}`;
+
+        this.logger.debug('Fetching file log from Enrollment API', DXApiService.name, {
+            endpoint,
+        });
+
+        try {
+            const res = await fetch(endpoint, {
+                headers: {
+                    'X-API-Key': apiKey,
+                },
+            });
+
+            if (!res.ok) {
+                const errText = await res.text();
+                this.logger.error(`Enrollment file-log API error: HTTP ${res.status} - ${errText}`, DXApiService.name);
+                throw new Error(`File-log fetch failed: ${errText}`);
+            }
+
+            const data = await res.json();
+            return data;
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+                `Error fetching file log: ${err.message}`,
+                err.stack,
+                DXApiService.name,
+                { endpoint },
+            );
+            throw err;
+        }
+    }
 }

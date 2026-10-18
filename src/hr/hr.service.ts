@@ -5572,4 +5572,71 @@ export class HRService {
             return { error: 'Validation failed', detail: err.message, status: 500 };
         }
     }
+
+    async getFileUploads(
+        tenantId: string,
+        user: UserSessionPayload,
+        corpIdOverride?: number,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+            const corpIds = await this.claimService.resolveFallbackCorpIds(
+                normalizedTenantId,
+                user,
+                tenantConfig,
+                isLawton,
+            );
+
+            const enrollmentApiUrl = tenantConfig?.config?.dataexchange?.api || '';
+            const enrollmentApiKey = tenantConfig?.config?.dataexchange?.key || '';
+
+            if (!enrollmentApiUrl) {
+                this.logger.error('Enrollment API URL not configured', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { error: 'Enrollment API URL not configured', status: 500 };
+            }
+
+            const params = new URLSearchParams();
+            if (corpIdOverride && corpIdOverride > 0) {
+                params.set('corp_id', String(corpIdOverride));
+                params.set('role', 'hr');
+            } else {
+                const sessionCorpId = Number((user as any)?.corpId || user?.providerCorpId || 0);
+                const corpId = sessionCorpId > 0 ? sessionCorpId : corpIds[0] || 140;
+                params.set('corp_id', String(corpId));
+                params.set('role', 'hr');
+            }
+
+            const data = await this.dxApiService.getFileLog(
+                enrollmentApiUrl,
+                enrollmentApiKey,
+                params,
+            );
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `File uploads log fetched in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, corpIdOverride },
+            );
+
+            return { success: true, data };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching HR file uploads after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            return { error: 'Internal server error', status: 500 };
+        }
+    }
 }

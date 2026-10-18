@@ -678,4 +678,18 @@ export class HRController {
 
         return res.status(200).json(result);
     }
+
+    @Get('file-uploads')
+    async getFileUploads(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Query('corpId') corpId?: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const corpIdOverride = Number(corpId || 0);
+        return this.hrService.getFileUploads(tenantId, user, corpIdOverride);
+    }
 }
