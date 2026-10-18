@@ -249,4 +249,44 @@ export class DXApiService {
             return { success: false, message: 'Could not load claim details.' };
         }
     }
+
+    async getEnrollments(
+        baseUrl: string,
+        apiKey: string,
+        params: URLSearchParams,
+    ): Promise<any> {
+        if (!baseUrl) {
+            this.logger.error('Enrollment API base URL is not configured', undefined, DXApiService.name);
+            throw new Error('Enrollment API URL is not configured.');
+        }
+
+        const cleanUrl = baseUrl.replace(/\/+$/, '');
+        const queryStr = params.toString();
+        const endpoint = `${cleanUrl}/api/broker/enrollments${queryStr ? `?${queryStr}` : ''}`;
+
+        this.logger.debug('Calling Enrollment API', DXApiService.name, {
+            endpoint,
+            params: Object.fromEntries(params.entries()),
+        });
+
+        try {
+            const response = await this.httpService.get<any>(endpoint, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-API-Key': apiKey,
+                },
+            });
+
+            return response;
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+                `Enrollment API request error: ${err.message}`,
+                err.stack,
+                DXApiService.name,
+                { endpoint },
+            );
+            throw err;
+        }
+    }
 }

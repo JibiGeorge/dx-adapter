@@ -4863,4 +4863,175 @@ export class HRService {
             return { error: 'Internal server error fetching enrollment token' };
         }
     }
+
+    async getEnrollmentStatus(
+        tenantId: string,
+        user: UserSessionPayload,
+        query: any,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+            const corpIds = await this.claimService.resolveFallbackCorpIds(
+                normalizedTenantId,
+                user,
+                tenantConfig,
+                isLawton,
+            );
+
+            const corpIdOverride = Number(query?.corpId || 0);
+            const {
+                polId,
+                policyNo,
+                refFile,
+                insuranceId,
+                productId,
+                productType,
+                operation,
+                approval,
+                page = '1',
+                limit = '50',
+            } = query || {};
+
+            const enrollmentApiUrl = tenantConfig?.config?.dataexchange?.api || '';
+            const enrollmentApiKey = tenantConfig?.config?.dataexchange?.key || '';
+
+            if (!enrollmentApiUrl) {
+                this.logger.error('Enrollment API URL not configured', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { error: 'Enrollment API URL not configured' };
+            }
+
+            const params = new URLSearchParams();
+
+            // Corporate scoping
+            if (corpIdOverride > 0) {
+                params.set('corp_id', String(corpIdOverride));
+            } else {
+                const sessionCorpId = Number(
+                    user?.providerCorpId || user?.providerGroupCorpId || (user as any)?.corpId || 0,
+                );
+                const corpId =
+                    sessionCorpId > 0
+                        ? sessionCorpId
+                        : corpIds[0] && corpIds[0] !== 140
+                            ? corpIds[0]
+                            : 0;
+                if (corpId > 0) {
+                    params.set('corp_id', String(corpId));
+                }
+            }
+
+            const portalName = user?.activePortal || 'hr';
+            if (portalName === 'broker' && (user as any)?.brokerId) {
+                params.set('broker_id', String((user as any).brokerId));
+            }
+
+            if (polId) params.set('pol_id', String(polId));
+            if (policyNo) params.set('policy_no', String(policyNo));
+            if (insuranceId) params.set('insurance_id', String(insuranceId));
+            if (productId) params.set('product_id', String(productId));
+            if (productType) params.set('product_type', String(productType));
+            if (operation && operation !== 'All') params.set('operation', String(operation));
+
+            if (approval) {
+                let mappedApproval = String(approval);
+                if (mappedApproval === 'pending') mappedApproval = 'null';
+                else if (mappedApproval === 'approved') mappedApproval = '1';
+                else if (mappedApproval === 'rejected') mappedApproval = '0';
+                else if (mappedApproval === 'inprogress' || mappedApproval === 'in_progress') mappedApproval = '2';
+                else if (mappedApproval === 'processed') mappedApproval = '3';
+                params.set('approval', mappedApproval);
+            }
+            params.set('page', String(page));
+            params.set('limit', String(limit));
+
+            const hasOperationFilter = Boolean(operation && operation !== 'All');
+            const needsSeparateStats = hasOperationFilter || Boolean(approval);
+
+            const filterRowsByRefFile = (data: any) => {
+                if (refFile && Array.isArray(data?.rows)) {
+                    const fileStr = String(refFile).trim().toLowerCase();
+                    data.rows = data.rows.filter(
+                        (r: any) => (r.ref_file || '').trim().toLowerCase() === fileStr,
+                    );
+                    let p = 0, a = 0, rj = 0, ip = 0, pr = 0;
+                    let opC = 0, opU = 0, opD = 0;
+                    data.rows.forEach((r: any) => {
+                        if (r.approval === 1 || r.approval === true) a++;
+                        else if (r.approval === 0 || r.approval === 4 || r.approval === false) rj++;
+                        else if (r.approval === 2) ip++;
+                        else if (r.approval === 3) pr++;
+                        else p++;
+
+                        if (r.operation === 'Create') opC++;
+                        else if (r.operation === 'Update') opU++;
+                        else if (r.operation === 'Disable') opD++;
+                    });
+                    data.stats = {
+                        total: data.rows.length,
+                        pending: p,
+                        approved: a,
+                        rejected: rj,
+                        in_progress: ip,
+                        processed: pr,
+                        op_create: opC,
+                        op_update: opU,
+                        op_disable: opD,
+                    };
+                }
+            };
+
+            let data: any;
+            if (needsSeparateStats) {
+                const statsParams = new URLSearchParams(params);
+                statsParams.delete('operation');
+                statsParams.delete('approval');
+                statsParams.set('page', '1');
+                statsParams.set('limit', '1');
+
+                const [enrollRes, statsRes] = await Promise.allSettled([
+                    this.dxApiService.getEnrollments(enrollmentApiUrl, enrollmentApiKey, params),
+                    this.dxApiService.getEnrollments(enrollmentApiUrl, enrollmentApiKey, statsParams),
+                ]);
+
+                if (enrollRes.status === 'rejected') {
+                    throw enrollRes.reason;
+                }
+
+                data = enrollRes.value;
+                if (statsRes.status === 'fulfilled' && statsRes.value?.stats) {
+                    data.stats = statsRes.value.stats;
+                }
+            } else {
+                data = await this.dxApiService.getEnrollments(enrollmentApiUrl, enrollmentApiKey, params);
+            }
+
+            filterRowsByRefFile(data);
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Enrollment status retrieved in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, rowCount: data?.rows?.length || 0 },
+            );
+
+            return { success: true, data };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching HR enrollment status after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            return { error: 'Internal server error fetching enrollment status' };
+        }
+    }
 }
