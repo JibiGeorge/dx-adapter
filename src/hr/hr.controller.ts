@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Headers, Query, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Headers, Param, Query, UseGuards } from "@nestjs/common";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard.js";
 import { HRRoleGuard } from "../../common/guards/hr-role.guard.js";
 import { HRService } from "./hr.service.js";
@@ -94,5 +94,61 @@ export class HRController {
         }
 
         return this.hrService.getPlanTypes(policyNo, tenantId);
+    }
+
+    @Get('/policies/:policyNo/beneficiaries')
+    async getBeneficiariesForPolicy(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Headers('host') host: string,
+        @Param('policyNo') policyNo: string,
+        @Query('polId') polId?: string,
+        @Query('corpIdOverride') corpIdOverride?: string,
+        @Query('startIndex') startIndex?: string,
+        @Query('range') range?: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        if (!policyNo) {
+            throw new BadRequestException('Policy number is required');
+        }
+
+        return this.hrService.getPolicyBeneficiaries({
+            policyNo,
+            user,
+            polId: polId ? Number(polId) : 0,
+            corpIdOverride: corpIdOverride
+                ? Number(corpIdOverride)
+                : 0,
+            startIndex: startIndex ? Number(startIndex) : 0,
+            range: range ? Number(range) : 100,
+            tenantId: tenantId,
+            host: host
+        });
+    }
+
+    @Get('beneficiaries-search')
+    async getBeneficiariesSearch(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Headers('host') host: string,
+        @Query() query: {
+            empCode?: string;
+            corpIdOverride?: string;
+            polId?: string;
+            benefName?: string;
+            benefEmail?: string;
+            policyPlan?: string;
+            pihNumber?: string;
+            maid?: string;
+        },
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.beneficiariesSearch(tenantId, user, host, query);
     }
 }

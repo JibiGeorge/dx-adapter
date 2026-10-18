@@ -6,10 +6,21 @@ import { TenantConfigTypes } from "../tenant/tenant.types.js";
 import { TenantService } from "../tenant/tenant.service.js";
 import { LAWTON_TENANT_ID } from "../broker/broker.constants.js";
 import { HRDashboardResponse, HRStatusResponse, SubCorpItem } from "./hr.types.js";
-import { parseDotNetDate } from "../../utils/date-helper.js";
+import { formatDateDDMMYYYY, parseDotNetDate } from "../../utils/date-helper.js";
 import { GetCorpDto } from "./dto/corp.dto.js";
 import { BrokerService } from "../broker/broker.service.js";
 import { SqlServerService } from "../database/sql-server.service.js";
+
+interface PolicyBeneficiariesParams {
+    policyNo: string;
+    user: UserSessionPayload;
+    polId: number;
+    corpIdOverride: number;
+    startIndex: number;
+    range: number;
+    tenantId: string;
+    host: string;
+}
 
 function safeParseDotNetDate(value?: string | null): Date | null {
     if (!value) return null;
@@ -1013,6 +1024,357 @@ export class HRService {
                 { tenantId: trimmedTenantId, policyNo: trimmedPolicyNo, durationMs },
             );
             return { success: false, error: 'Failed to fetch plan types', plans: [] };
+        }
+    }
+
+    async getPolicyBeneficiaries(params: PolicyBeneficiariesParams) {
+        const startedAt = Date.now();
+        const {
+            policyNo,
+            user,
+            polId,
+            corpIdOverride,
+            startIndex,
+            range,
+            tenantId,
+            host
+        } = params;
+
+        const normalizedTenantId = tenantId.trim();
+
+        const normalizedHost = (host || '').toLowerCase();
+        const tenantConfig: TenantConfigTypes =
+            await this.tenantService.getFullTenantById(normalizedTenantId);
+
+        if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            throw new InternalServerErrorException('Tenant not found');
+        }
+
+        try {
+            const corpIds = await await this.brokerService.resolveBrokerCorpIds(user, tenantConfig, normalizedHost);
+            const payload: any = {
+                PolicyNo: policyNo,
+                Range: range,
+                StartIndex: startIndex,
+                PolicyCorpIds: corpIdOverride > 0 ? [corpIdOverride] : corpIds,
+            };
+            if (polId > 0) payload.PolicyIds = [polId];
+
+            const benefResponse = await this.claimService.searchBeneficiaries(
+                payload,
+                tenantConfig.config.claimApis.v2,
+                tenantConfig.config.claimApis.v2Key,
+                normalizedTenantId,
+                true
+            );
+            const benefDetails: any = benefResponse?.beneficiaryDetails || benefResponse?.BeneficiaryDetails || [];
+            const mappedBenefs = benefDetails.map((b: any) => {
+                const relation = b.benefRelName || b.Relation || '';
+                return {
+                    firstName: b.benefName || b.Name || '',
+                    lastName: b.benefLastName || b.LastName || '',
+                    empId: b.primaryBenefDetails?.priBenefEmpCode || b.PriBenefEmpCode || b.primaryBenefDetails?.actualEmpCode || '',
+                    relation: relation.trim().toLowerCase() === 'self' ? 'Insured' : relation,
+                };
+            });
+            const totalCount = Number(benefResponse?.totalRecordsCount ?? benefResponse?.TotalRecordsCount ?? mappedBenefs.length);
+            return {
+                success: true,
+                count: totalCount,
+                totalCount: totalCount,
+                beneficiaries: mappedBenefs,
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error while fetching pbeneficiaries after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+            );
+            return { error: 'Internal server error fetching beneficiaries' };
+        }
+    }
+
+    async beneficiariesSearch(
+        tenantId: string,
+        user: UserSessionPayload,
+        host: string,
+        query: {
+            empCode?: string;
+            corpIdOverride?: string;
+            polId?: string;
+            benefName?: string;
+            benefEmail?: string;
+            policyPlan?: string;
+            pihNumber?: string;
+            maid?: string;
+        } = {}) {
+        const startedAt = Date.now();
+
+        const normalizedTenantId = tenantId.trim();
+
+        const normalizedHost = (host || '').toLowerCase();
+        const tenantConfig: TenantConfigTypes =
+            await this.tenantService.getFullTenantById(normalizedTenantId);
+
+        if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            throw new InternalServerErrorException('Tenant not found');
+        }
+        const corpIds = await await this.brokerService.resolveBrokerCorpIds(user, tenantConfig, normalizedHost);
+
+        const { empCode, corpIdOverride, polId, benefName, benefEmail, policyPlan, pihNumber, maid } = query;
+        const overrideCorpId = corpIdOverride ? Number(corpIdOverride) : 0;
+        const hasFilter = Boolean(empCode || benefName || benefEmail || pihNumber || maid || (polId && Number(polId) > 0) || (policyPlan && !String(policyPlan).includes('Select Plan')));
+        if (!hasFilter) {
+            return { error: 'Please select a Policy or enter Name, Email, or Staff ID' }
+        }
+
+        try {
+            const payload: any = {
+                AllowFuzzinessInBenefName: false,
+                PercentageMatchForFuzziness: 0,
+                Range: 100,
+                StartIndex: 0,
+                PolicyCorpIds: overrideCorpId > 0 ? [overrideCorpId] : (corpIds.length > 0 ? corpIds : undefined),
+                PolicyIds: polId && Number(polId) > 0 ? [Number(polId)] : undefined,
+            };
+            if (benefName) payload.BeneficiaryName = String(benefName);
+            if (benefEmail) payload.BenefEmail = String(benefEmail);
+            if (pihNumber) {
+                payload.MemberId = String(pihNumber);
+                payload.InsurerBenefNumber = String(pihNumber);
+            }
+            if (maid) payload.MAID = Number(maid);
+
+            const benefResponse = await this.claimService.searchBeneficiaries(
+                payload,
+                tenantConfig.config.claimApis.v2,
+                tenantConfig.config.claimApis.v2Key,
+                normalizedTenantId,
+                true
+            );
+
+            let details: any = benefResponse?.beneficiaryDetails || [];
+            // Support full name searches (e.g. "John Doe"): if the initial query returned no results,
+            // search by individual first and last name parts and combine results.
+            const trimmedSearchName = String(benefName || '').trim();
+            const searchNameParts = trimmedSearchName.split(/\s+/).filter(Boolean);
+            if (details.length === 0 && searchNameParts.length > 1) {
+                const candidateMap = new Map<number, any>();
+                try {
+                    const firstResp = await this.claimService.searchBeneficiaries(
+                        { ...payload, BeneficiaryName: searchNameParts[0], Range: 100 },
+                        tenantConfig.config.claimApis.v2,
+                        tenantConfig.config.claimApis.v2Key,
+                        normalizedTenantId,
+                        true);
+                    ((firstResp as any)?.beneficiaryDetails || []).forEach((b: any) => {
+                        const m = Number(b.benefMediAssistID || b.MediAssistID || b.mediAssistID || 0);
+                        if (m > 0) candidateMap.set(m, b);
+                    });
+                } catch { /* non-fatal fallback */ }
+                try {
+                    const lastResp = await this.claimService.searchBeneficiaries(
+                        { ...payload, BeneficiaryName: searchNameParts[searchNameParts.length - 1], Range: 100 },
+                        tenantConfig.config.claimApis.v2,
+                        tenantConfig.config.claimApis.v2Key,
+                        normalizedTenantId,
+                        true
+                    );
+                    ((lastResp as any)?.beneficiaryDetails || []).forEach((b: any) => {
+                        const m = Number(b.benefMediAssistID || b.MediAssistID || b.mediAssistID || 0);
+                        if (m > 0) candidateMap.set(m, b);
+                    });
+                } catch { /* non-fatal fallback */ }
+
+                const normalizedParts = searchNameParts.map(p => p.toLowerCase());
+                details = Array.from(candidateMap.values()).filter((b: any) => {
+                    const full = [
+                        b.benefName || b.Name || '',
+                        b.benefMiddleName || b.MiddleName || '',
+                        b.benefLastName || b.LastName || '',
+                    ].filter(Boolean).join(' ').toLowerCase();
+                    return normalizedParts.every(part => full.includes(part));
+                });
+            }
+
+            // Filter out rows without PlanType or active policy (mirrors C# logic)
+            details = (details ?? []).filter((b: any) => b?.benefPlanType && b?.policyDetail?.polActive);
+
+            // Filter by plan type if provided
+            if (policyPlan && !String(policyPlan).includes('Select Plan')) {
+                details = details.filter((b: any) => b.benefPlanType === String(policyPlan));
+            }
+
+            // Post-filtering: enforce that all words in BeneficiaryName match the person's full name
+            if (benefName) {
+                const normalizedParts = searchNameParts.map(p => p.toLowerCase());
+                const nameMatches = details.filter((b: any) => {
+                    const full = [
+                        b.benefName || b.Name || '',
+                        b.benefMiddleName || b.MiddleName || '',
+                        b.benefLastName || b.LastName || '',
+                    ].filter(Boolean).join(' ').toLowerCase();
+                    return normalizedParts.every(part => full.includes(part));
+                });
+                if (nameMatches.length > 0) {
+                    details = nameMatches;
+                }
+            }
+
+            // Post-filtering by Staff ID (Employee No)
+            if (empCode) {
+                const targetEmp = String(empCode).trim().toLowerCase();
+                const empMatches = details.filter((b: any) => {
+                    const ec = String(b.primaryBenefDetails?.actualEmpCode || b.employeeCode || b.empCode || b.actualEmpCode || '').trim().toLowerCase();
+                    return ec === targetEmp;
+                });
+                details = empMatches;
+
+            }
+
+            // Post-filtering by PIH Member ID / MAID
+            const targetPih = String(pihNumber || maid || '').trim().toLowerCase();
+            if (targetPih) {
+                const pihMatches = details.filter((b: any) => {
+                    const p = String(b.benefNIAPersonID || b.insurerBenefNumber || b.benefMediAssistID || '').trim().toLowerCase();
+                    return p === targetPih || p.endsWith(targetPih);
+                });
+                if (pihMatches.length > 0) {
+                    details = pihMatches;
+                }
+            }
+
+            // Deduplicate by unique beneficiary (Maid + PolID) so each insured member / dependent is retained,
+            // but duplicate rows from multiple sub-plans/riders for the same beneficiary are avoided
+            const uniqueBeneficiaries = new Map<string, any>();
+            details.forEach((b: any) => {
+                const maid = b.benefMediAssistID || b.MediAssistID || b.benefNIAPersonID || b.insurerBenefNumber || '';
+                const pid = b.policyDetail?.polID || polId || '';
+                const key = maid ? `${maid}:${pid}` : `${b.benefName}_${b.benefLastName}_${b.primaryBenefDetails?.actualEmpCode || b.employeeCode || Math.random()}`;
+                if (!uniqueBeneficiaries.has(key)) {
+                    uniqueBeneficiaries.set(key, b);
+                }
+            });
+            details = Array.from(uniqueBeneficiaries.values());
+
+            // Fetch memberPolicyStatus per unique (polId, empCode) pair in parallel (capped with timeout)
+            const statusMap: Record<string, string> = {};
+            const uniquePairs = new Map<string, { polIdNum: number; empCodeStr: string }>();
+            details.forEach((b: any) => {
+                const pid = Number(b.policyDetail?.polID || polId || 0);
+                const ec = String(b.primaryBenefDetails?.actualEmpCode || b.employeeCode || '');
+                if (pid > 0 && ec) uniquePairs.set(`${pid}:${ec}`, { polIdNum: pid, empCodeStr: ec });
+            });
+
+            const pairsToFetch = Array.from(uniquePairs.entries()).slice(0, 15);
+            await Promise.all(
+                pairsToFetch.map(async ([key, { polIdNum, empCodeStr }]) => {
+                    try {
+                        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500));
+                        const payload = {
+                            masterPolicyId: polIdNum,
+                            employeeCode: empCodeStr,
+                            dbType: 'MA'
+                        }
+                        const fetchPromise = this.claimService.fetchMemberPolicyDetails(tenantConfig.config.claimApis.v3, payload, tenantConfig.config.claimApis.v2, tenantId);
+                        const res: any = await Promise.race([fetchPromise, timeoutPromise]);
+                        statusMap[key] = res?.memberPolicyDetails?.[0]?.memberPolicyStatus || '';
+                    } catch {
+                        statusMap[key] = '';
+                    }
+                })
+            );
+
+            const safeFormatDate = (v: any) => {
+                if (!v) return '';
+                try {
+                    if (typeof v === 'string' && v.includes('/Date(')) {
+                        return formatDateDDMMYYYY(parseDotNetDate(v));
+                    }
+                    const d = new Date(v);
+                    if (!isNaN(d.getTime())) return formatDateDDMMYYYY(d);
+                } catch { }
+                return '';
+            };
+
+            const nowToday = new Date();
+            nowToday.setHours(0, 0, 0, 0);
+
+            details = details.map((item: any) => {
+                const pid = Number(item.policyDetail?.polID || polId || 0);
+                const ec = String(item.primaryBenefDetails?.actualEmpCode || item.employeeCode || '');
+                const minStartRaw = item.benefWEF || item.policyDetail?.polStartDate || item.polStartDate || '';
+                const maxEndRaw = item.policyDetail?.polEndDate || item.polEndDate || '';
+                item.polInsurerPolStartDate = minStartRaw || item.policyDetail?.polStartDate || item.polStartDate || '';
+                item.polInsurerPolEndDate = maxEndRaw || item.policyDetail?.polEndDate || item.polEndDate || '';
+
+                const polEndDate = item.policyDetail?.polEndDate ? parseDotNetDate(item.policyDetail.polEndDate) : null;
+                const isPolExpired = polEndDate && !isNaN(polEndDate.getTime()) && polEndDate < nowToday;
+                const isPolActive = item.policyDetail?.polActive !== false && !isPolExpired;
+
+                const rawStatus = String(item.benefStatus || item.memberStatus || '').trim().toUpperCase();
+                let memberStatus = 'Active';
+                if (['C', 'CANCELLED', 'CANCELED', 'I', 'INACTIVE', 'D', 'DELETED', 'E', 'EXPIRED', 'S', 'SUSPENDED'].includes(rawStatus) || item.benefActive === false) {
+                    memberStatus = 'InActive';
+                } else {
+                    memberStatus = 'Active';
+                }
+
+                let polStatus = statusMap[`${pid}:${ec}`];
+                if (!polStatus) {
+                    if (memberStatus === 'InActive') {
+                        polStatus = 'Cancelled';
+                    } else if (isPolActive) {
+                        polStatus = 'Active Current';
+                    } else if (isPolExpired) {
+                        polStatus = 'Expired';
+                    } else {
+                        polStatus = 'Active Current';
+                    }
+                }
+
+                return {
+                    ...item,
+                    benefUserId: item.benefUserID ?? item.benefUserId,
+                    BenefUserId: item.benefUserID ?? item.benefUserId,
+                    Name: item.benefName || item.Name || '',
+                    MiddleName: item.benefMiddleName || item.MiddleName || '',
+                    LastName: item.benefLastName || item.LastName || '',
+                    benefRelName: item.benefRelName || item.Relation || item.relationName || item.relation || '',
+                    pihNumber: item.benefNIAPersonID || item.insurerBenefNumber || item.benefMediAssistID || '',
+                    entryDate: safeFormatDate(item.polInsurerPolStartDate || item?.policyDetail?.polStartDate),
+                    expiryEndDate: safeFormatDate(item.polInsurerPolEndDate || item?.policyDetail?.polEndDate),
+                    memberPolicyStatus: polStatus,
+                    memberStatus,
+                };
+            });
+
+            return { success: true, beneficiaries: details }
+
+
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error while fetching pbeneficiaries after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+            );
+            return { error: 'Internal server error searching beneficiaries' };
         }
     }
 }

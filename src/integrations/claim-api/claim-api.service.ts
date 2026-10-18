@@ -235,4 +235,44 @@ export class ClaimApiService {
 
     return response;
   }
+
+  async searchBeneficiaries(payload: any, baseUrl: string, accessKey: string, tenantId: string, showAllClaims: boolean) {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/api/v2/BeneficiarySearch/.json`;
+
+    console.log("payload",payload)
+    const response = await this.httpService.post<AgentPolicySearchResponse>(endpoint, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CA-SHARED-KEY': accessKey,
+        'Payer': tenantId,
+        'LoadArchive': showAllClaims ? 'True' : 'False',
+      },
+    });
+
+    console.log("response",response)
+
+    return response;
+  }
+
+  async fetchMemberPolicyDetails(baseUrl: string, payload: any, accessKey: string, tenantId: string) {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/FetchMemberPolicyDeatils`;
+
+    const response = await this.httpService.post<AgentPolicySearchResponse>(endpoint, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CA-SHARED-KEY': accessKey,
+        'Payer': tenantId,
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response;
+      this.logger.error(`Failed fetch member policy details ${response.status}: ${errorText}`);
+      throw new Error(`Failed Fetch Member Policy Details: ${response.statusText}`);
+    }
+
+    return response;
+  }
 }
