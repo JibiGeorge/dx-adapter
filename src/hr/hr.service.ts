@@ -4557,4 +4557,54 @@ export class HRService {
             return { error: 'Internal server error searching hospitals' };
         }
     }
+
+    async getHospitalSpecialities(
+        tenantId: string,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const v1Url =
+                tenantConfig?.config?.claimApis?.v1 ||
+                tenantConfig?.config?.claimApis?.v1Lawton;
+
+            if (!v1Url) {
+                this.logger.warn('ClaimAPIV1Url is not configured for tenant, returning empty specialities', HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { success: true, specialities: [] };
+            }
+
+            const data: any = await this.claimService.getHospitalSpecialities(v1Url);
+            let specialities: string[] = [];
+
+            if (data?.result && typeof data.result === 'object' && !Array.isArray(data.result)) {
+                specialities = Object.values(data.result as Record<string, string>).filter(Boolean);
+            } else if (Array.isArray(data)) {
+                specialities = data
+                    .map((s: any) => (typeof s === 'string' ? s : s?.Value || s?.value || s?.Name || s?.name || ''))
+                    .filter(Boolean);
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Fetched ${specialities.length} hospital specialities in ${durationMs}ms`,
+                HRService.name,
+                { count: specialities.length, tenantId: normalizedTenantId },
+            );
+
+            return { success: true, specialities };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+                `Error fetching hospital specialities: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId },
+            );
+            return { success: true, specialities: [] };
+        }
+    }
 }

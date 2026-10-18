@@ -607,4 +607,26 @@ export class ClaimApiService {
       throw err;
     }
   }
+
+  async getHospitalSpecialities(baseUrl: string): Promise<any> {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/HospitalSpecialities.json`;
+
+    this.logger.debug(`Calling getHospitalSpecialities at: ${endpoint}`, ClaimApiService.name, {
+      endpoint,
+    });
+
+    try {
+      const response = await this.httpService.get<any>(endpoint);
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.warn(
+        `getHospitalSpecialities warning/error: ${err.message}`,
+        ClaimApiService.name,
+        { endpoint },
+      );
+      return null;
+    }
+  }
 }

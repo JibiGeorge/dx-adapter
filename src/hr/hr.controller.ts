@@ -496,4 +496,15 @@ export class HRController {
 
         return this.hrService.searchHospitals(tenantId, user, body);
     }
+
+    @Get('hospitals/specialities')
+    async getHospitalSpecialities(
+        @Headers('x-tenant-id') tenantId: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getHospitalSpecialities(tenantId);
+    }
 }
