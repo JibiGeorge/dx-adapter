@@ -9,6 +9,7 @@ import { HRDashboardResponse, HRStatusResponse } from "./hr.types.js";
 import { GetCorpDto } from "./dto/corp.dto.js";
 import { UpdateBeneficiaryDetailsDto } from "./dto/beneficiary.dto.js";
 import { DownloadEcardDto, SearchEcardDetailsDto, ViewCoverageLetterDto, ViewEcardDto } from "./dto/ecard.dto.js";
+import { HospitalSearchDto } from "./dto/hospital.dto.js";
 
 @Controller('hr')
 @UseGuards(JwtAuthGuard, HRRoleGuard)
@@ -481,5 +482,18 @@ export class HRController {
         }
 
         return this.hrService.getNetworkHospital(tenantId, user);
+    }
+
+    @Post('hospitals/search')
+    async searchHospitals(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Body() body: HospitalSearchDto,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.searchHospitals(tenantId, user, body);
     }
 }

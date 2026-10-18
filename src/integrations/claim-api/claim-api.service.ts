@@ -578,4 +578,33 @@ export class ClaimApiService {
       throw err;
     }
   }
+
+  async getHospitalsByLocation(baseUrl: string, payload: any): Promise<any> {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/getHospitalsByLocation`;
+
+    this.logger.debug(`Calling getHospitalsByLocation at: ${endpoint}`, ClaimApiService.name, {
+      endpoint,
+      payload,
+    });
+
+    try {
+      const response = await this.httpService.post<any>(endpoint, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `getHospitalsByLocation error: ${err.message}`,
+        err.stack,
+        ClaimApiService.name,
+        { endpoint },
+      );
+      throw err;
+    }
+  }
 }

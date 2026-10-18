@@ -4467,4 +4467,94 @@ export class HRService {
             return { success: false, error: 'Internal server error' };
         }
     }
+
+    async searchHospitals(
+        tenantId: string,
+        user: UserSessionPayload,
+        body: any,
+    ): Promise<any> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+
+        const {
+            InsuranceCompany,
+            Latitude,
+            Longitude,
+            Distance,
+            HospSpeciality,
+            MARating,
+            corporateId: corpIdBody,
+        } = body || {};
+
+        const sessionCorpId = Number((user as any)?.corpId || user?.providerCorpId || 0);
+        let corpId = Number(corpIdBody || 0) > 0 ? Number(corpIdBody) : sessionCorpId;
+
+        const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+        const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+        if (!corpId || corpId <= 0) {
+            const corpIds = await this.claimService.resolveFallbackCorpIds(
+                normalizedTenantId,
+                user,
+                tenantConfig,
+                isLawton,
+            );
+            corpId = corpIds[0] || sessionCorpId;
+        }
+
+        const v1Url =
+            tenantConfig?.config?.claimApis?.v1 ||
+            tenantConfig?.config?.claimApis?.v1Lawton;
+
+        if (!v1Url) {
+            this.logger.error('ClaimAPIV1Url is not configured for tenant', undefined, HRService.name, {
+                tenantId: normalizedTenantId,
+            });
+            return { error: 'Claim API V1 URL is not configured' };
+        }
+
+        const payload = {
+            InsuranceCompany: InsuranceCompany || '',
+            Latitude: Number(Latitude || 0),
+            Longitude: Number(Longitude || 0),
+            Distance: Number(Distance || 5),
+            HospSpeciality: HospSpeciality || '',
+            MARating: Number(MARating || 0),
+            CorporateId: corpId,
+        };
+
+        this.logger.debug('Searching hospitals by location', HRService.name, {
+            tenantId: normalizedTenantId,
+            v1Url,
+            payload,
+        });
+
+        try {
+            const data: any = await this.claimService.getHospitalsByLocation(v1Url, payload);
+            const hospitals = Array.isArray(data?.hospitals)
+                ? data.hospitals
+                : Array.isArray(data?.Hospitals)
+                  ? data.Hospitals
+                  : [];
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Found ${hospitals.length} hospitals in ${durationMs}ms`,
+                HRService.name,
+                { count: hospitals.length },
+            );
+
+            return { success: true, hospitals };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error searching hospitals after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, payload },
+            );
+            return { error: 'Internal server error searching hospitals' };
+        }
+    }
 }
