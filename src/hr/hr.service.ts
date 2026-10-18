@@ -19,6 +19,7 @@ import { TENANTS } from "../../utils/tentant-helper.js";
 import { JwtService } from "@nestjs/jwt";
 import { UpdateProfileDto } from "./dto/update-profile.dto.js";
 import { ChangePasswordDto } from "./dto/change-password.dto.js";
+import { BasicInfoChangeDto } from "./dto/basic-info-change.dto.js";
 import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
@@ -6473,5 +6474,58 @@ export class HRService {
                 statusCode: 500,
             };
         }
+    }
+
+    async requestBasicInfoChange(
+        tenantId: string,
+        user: UserSessionPayload,
+        file: UploadedMulterFile,
+        body: BasicInfoChangeDto,
+    ): Promise<{
+        isSuccess: boolean;
+        message: string;
+        statusCode?: number;
+    }> {
+        const normalizedTenantId = tenantId.trim();
+        const { category, comment } = body || {};
+
+        if (!category || !comment) {
+            return {
+                isSuccess: false,
+                message: 'Correction category and comment are required.',
+                statusCode: 400,
+            };
+        }
+
+        if (!file) {
+            return {
+                isSuccess: false,
+                message: 'Please attach your ID proof document.',
+                statusCode: 400,
+            };
+        }
+
+        const portalName = user?.activePortal || 'hr';
+
+        this.logger.log(
+            `Basic info change request submitted for user: ${user?.loginName}`,
+            HRService.name,
+            {
+                tenantId: normalizedTenantId,
+                user: user?.loginName,
+                portal: portalName,
+                category,
+                comment,
+                fileName: file.originalname,
+                fileSize: file.size,
+            },
+        );
+
+        return {
+            isSuccess: true,
+            message:
+                'Your basic information alteration request has been submitted successfully. Our support team will review your document and update your details.',
+            statusCode: 200,
+        };
     }
 }
