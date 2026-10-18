@@ -449,4 +449,46 @@ export class ClaimApiService {
     );
     return Array.from(allMaids);
   }
+
+  async getClaimDetails(claimId: string, dbType: string, baseUrl: string, accesskey: string, tenantId: string,) {
+    const numericClaimId = parseInt(claimId);
+
+    if (!numericClaimId || !dbType || !baseUrl) {
+      throw new Error("Invalid request");
+    }
+
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/api/v2/ClaimSearch/.json/`;
+
+    const payload = {
+      ClaimId: numericClaimId,
+      DbType: dbType,
+      Role: "Broker"
+    }
+
+    this.logger.debug("Claim search details", ClaimApiService.name, {
+      endpoint,
+      payload,
+    })
+
+    const response = await this.httpService.post<any>(endpoint, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CA-SHARED-KEY': accesskey,
+        'Payer': tenantId,
+        'LoadArchive': 'False',
+      },
+    });
+
+    if (!response?.isSuccess) {
+      this.logger.warn('Claim search failed or returned unsuccessful', ClaimApiService.name, {
+        endpoint,
+        response,
+      });
+
+      return response;
+    }
+
+    return response;
+  }
 }

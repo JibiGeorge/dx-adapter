@@ -2196,20 +2196,20 @@ export class HRService {
         },
     ) {
         const startedAt = Date.now();
-        const normalizedTenantId = String(tenantId || '').trim().toUpperCase();
-        const tenantConfig = this.tenantService.getFullTenantById(normalizedTenantId);
+        const normalizedTenantId = String(tenantId || '').trim();
+        const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
 
         if (!tenantConfig) {
             throw new BadRequestException('Invalid tenant-id header.');
         }
         try {
-            const claimRefNo = String(query.clmReferenceNo || '').trim();
+            const claimRefNo = String(query?.clmReferenceNo || '').trim();
             if (!claimRefNo) {
                 return { success: false, error: 'Missing claim reference number.' };
             }
 
-            const url = (await tenantConfig).config.dataexchange.api;
-            const key = (await tenantConfig).config.dataexchange.key;
+            const url = tenantConfig.config?.dataexchange?.api;
+            const key = tenantConfig.config?.dataexchange?.key;
             if (!url) {
                 return { success: false, error: 'Missing dataexchange.api configuration.' };
             }
@@ -2275,6 +2275,173 @@ export class HRService {
                 err.stack,
                 HRService.name,
                 { tenantId: normalizedTenantId, query },
+            );
+            return { success: false, error: 'Unable to load claim detail. Please try again.' };
+        }
+    }
+
+    async getActiveClaimDetail(
+        tenantId: string,
+        user: UserSessionPayload,
+        claimId: string,
+        dbTypeParam?: string,
+        refNoParam?: string,
+    ) {
+        const startedAt = Date.now();
+        const normalizedTenantId = String(tenantId || '').trim();
+        const resolvedDbType = dbTypeParam ? String(dbTypeParam).trim() : 'MA';
+
+        const numericClaimId = parseInt(claimId, 10) || 0;
+        const resolvedRefNo = String(refNoParam || '').trim();
+
+        if (!numericClaimId && !resolvedRefNo) {
+            return { success: false, message: 'Invalid claimId or refNo' };
+        }
+
+        const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(normalizedTenantId);
+
+        if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            throw new InternalServerErrorException('Tenant not found');
+        }
+
+        this.logger.debug('Fetching active claim detail', HRService.name, {
+            tenantId: normalizedTenantId,
+            numericClaimId,
+            resolvedRefNo,
+            resolvedDbType,
+            userId: user?.userId,
+        });
+
+        try {
+            let detailResp: any = null;
+            if (numericClaimId > 0) {
+                try {
+                    detailResp = await this.claimService.getClaimDetails(
+                        String(numericClaimId),
+                        resolvedDbType,
+                        tenantConfig.config?.claimApis?.v2,
+                        tenantConfig.config?.claimApis?.v2Key,
+                        tenantId,
+                    );
+                } catch (err) {
+                    const error = err instanceof Error ? err : new Error(String(err));
+                    this.logger.warn(`Failed fetching claim details from ClaimService: ${error.message}`, HRService.name, {
+                        numericClaimId,
+                        resolvedDbType,
+                    });
+                }
+            }
+            const d = detailResp?.claimDetails;
+
+            let dx: any = null;
+            if (resolvedRefNo) {
+                try {
+                    const url = tenantConfig.config?.dataexchange?.api;
+                    const key = tenantConfig.config?.dataexchange?.key;
+                    if (url) {
+                        const response = await this.dxApiService.claimDetailsByRefNo(url, key, resolvedRefNo);
+                        if (response?.isSuccess || response?.success) {
+                            dx = response?.claimDetailsView || response?.ClaimDetailsView || response || null;
+                        }
+                    }
+                } catch (err) {
+                    const error = err instanceof Error ? err : new Error(String(err));
+                    this.logger.warn(
+                        `Failed fetching claim details by ref number from DXApiService: ${error.message}`,
+                        HRService.name,
+                        { resolvedRefNo },
+                    );
+                }
+            }
+
+            if (!d && !dx) {
+                return { success: false, message: 'No detail found' };
+            }
+
+            const basic = d?.basicDetails || {};
+            const hospital = d?.hospital || {};
+            const payment = d?.payment || {};
+            const pribenef = d?.pribenefDetails || {};
+            const benef = d?.benefDetails || {};
+
+            const ailments = (d?.ailments || [])
+                .map((a: any) => a.ailmentSummary || a.ailmentCode || '')
+                .filter(Boolean)
+                .join(', ');
+
+            const denials = (d?.denialClauses || [])
+                .map((dc: any) => dc.denialClauseCode || dc.description || '')
+                .filter(Boolean)
+                .join(', ');
+
+            const fmtIso = (v: any) => {
+                if (!v) return null;
+                const date = new Date(v);
+                return isNaN(date.getTime()) ? null : formatDateDDMMYYYY(date);
+            };
+            const fmtDotNet = (v: any) => {
+                try { return formatDateDDMMYYYY(parseDotNetDate(v)) || null; } catch { return null; }
+            };
+
+            const rawAuditTrail = (dx?.claimAuditDetails?.length ? dx.claimAuditDetails : dx?.auditTrail) || [];
+            const auditTrail = rawAuditTrail
+                .map((a: any) => ({
+                    status: a.claimStatus || a.ClaimStatus || a.status || '',
+                    date: a.claimAuditTime || a.ClaimAuditTime || a.date || '',
+                    remarks: a.remarks || a.Remarks || '',
+                }))
+                .filter((a: any) => a.status || a.remarks);
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(`Retrieved active claim detail in ${durationMs}ms`, HRService.name, {
+                tenantId: normalizedTenantId,
+                numericClaimId,
+                resolvedRefNo,
+            });
+
+            return {
+                success: true,
+                detail: {
+                    claimId: numericClaimId,
+                    claimReferenceNo: basic.clmcomprefno || dx?.claimReferenceNo || resolvedRefNo,
+                    claimStatus: basic.claimStatus || dx?.statusName || '',
+                    claimType: basic.claimType || dx?.clmTypeDesc || '',
+                    claimAmount: Number(basic.clmamount || dx?.clmAmount || 0),
+                    approvedAmount: Number(basic.clmApprovedamt || dx?.clmApprovedAmt || 0),
+                    netPayAmount: Number(basic.clmNetPayAmount || dx?.clmNetPayAmount || 0),
+                    admissibleAmount: Number(basic.clmAdmissibleAmt || 0),
+                    doa: fmtDotNet(basic.clmdoa) || fmtIso(dx?.clmDOA),
+                    dod: fmtDotNet(basic.clmdod) || fmtIso(dx?.clmDOD),
+                    receivedDate: fmtDotNet(basic.clmrecdate) || fmtIso(dx?.clmReceivedDate),
+                    hospitalName: hospital.hospName || dx?.hospName || dx?.hospitalname || '',
+                    ailments: ailments || dx?.ailmentSummary || '',
+                    remarks: basic.clmletterremarks || basic.clmappremarks || '',
+                    denialRemarks: denials || dx?.denialReason || '',
+                    employeeName: pribenef.priBeneficiaryName || dx?.pribeneficiaryName || '',
+                    patientName: benef.benefName || benef.beneficiaryName || dx?.benefName || '',
+                    policyNumber: dx?.policyNumber || '',
+                    polHolderName: dx?.polHolderName || '',
+                    paymentAmount: Number(payment.paymentAmount || 0),
+                    paymentChequeNo: payment.paymentChequeNo || dx?.clmChequeNumber || '',
+                    paymentMode: basic.clmPaymentMode ? String(basic.clmPaymentMode) : '',
+                    insurerStatus: basic.claimInsurerStatus || '',
+                    auditTrail,
+                },
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching active claim details: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, claimId, refNo: resolvedRefNo },
             );
             return { success: false, error: 'Unable to load claim detail. Please try again.' };
         }

@@ -232,4 +232,23 @@ export class HRController {
         return this.hrService.getClaimDetailByRef(tenantId, user, query);
     }
 
+    @Get('active-claim-detail/:claimId')
+    async getActiveClaimDetail(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Param('claimId') claimId: string,
+        @Query('dbType') dbType?: string,
+        @Query('refNo') refNo?: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        if (!claimId?.trim()) {
+            throw new BadRequestException('claimId parameter is required');
+        }
+
+        return this.hrService.getActiveClaimDetail(tenantId, user, claimId, dbType, refNo);
+    }
+
 }
