@@ -6,11 +6,12 @@ import { ClaimApiModule } from "../integrations/claim-api/claim-api.module.js";
 import { TenantModule } from "../tenant/tenant.module.js";
 import { BrokerModule } from "../broker/broker.module.js";
 import { DatabaseModule } from "../database/database.module.js";
+import { DXApiModule } from "../integrations/dx-api/dx-api.module.js";
 
 @Module({
-  imports: [AuthModule, ClaimApiModule, TenantModule, BrokerModule, DatabaseModule],
+  imports: [AuthModule, ClaimApiModule, TenantModule, BrokerModule, DatabaseModule, DXApiModule],
   controllers: [HRController],
   providers: [HRService],
   exports: [HRService],
 })
-export class HRModule {}
+export class HRModule { }

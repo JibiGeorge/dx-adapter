@@ -114,7 +114,8 @@ export class TenantRepository {
             : [],
         },
         dataexchange: {
-          api: doc.config?.additionalConfigs?.dataexchange?.api ?? '',
+          api: doc.config?.dataexchange?.api ?? '',
+          key: doc.config?.dataexchange?.key ?? '',
         },
       },
     };

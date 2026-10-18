@@ -10,6 +10,7 @@ import { formatDateDDMMYYYY, formatDateString, parseDotNetDate } from "../../uti
 import { GetCorpDto } from "./dto/corp.dto.js";
 import { BrokerService } from "../broker/broker.service.js";
 import { SqlServerService } from "../database/sql-server.service.js";
+import { DXApiService } from "../integrations/dx-api/dx-api.service.js";
 
 interface PolicyBeneficiariesParams {
     policyNo: string;
@@ -90,6 +91,7 @@ export class HRService {
         private readonly tenantService: TenantService,
         private readonly brokerService: BrokerService,
         private readonly sqlServerService: SqlServerService,
+        private readonly dxApiService: DXApiService,
     ) { }
 
     async getHRData(tenantId: string, user: UserSessionPayload): Promise<HRDashboardResponse> {
@@ -1549,5 +1551,104 @@ export class HRService {
     private hasPolicyConfigTag(configList: any, tagName: string): boolean {
         return Array.isArray(configList) &&
             configList.some((c: any) => String(c?.tagName || '').trim() === tagName && String(c?.tagValue || '').trim() === '1');
+    }
+
+    async getBeneficiaryDetail(tenantId: string, user: UserSessionPayload, maid: string) {
+        const startedAt = Date.now();
+        const trimmedMaid = maid?.trim();
+        if (!trimmedMaid) {
+            return { success: false, message: 'Invalid beneficiary id.' };
+        }
+
+        const normalizedTenantId = tenantId.trim();
+        const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(normalizedTenantId);
+
+        if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            throw new InternalServerErrorException('Tenant not found');
+        }
+
+        const dxApiUrl = tenantConfig.config?.dataexchange?.api;
+        const dxApiKey = tenantConfig.config?.dataexchange?.key;
+
+        this.logger.debug('Fetching beneficiary detail', HRService.name, {
+            tenantId: normalizedTenantId,
+            maid: trimmedMaid,
+            userId: user?.userId,
+        });
+
+        try {
+            const response = await this.dxApiService.getBeneficiaryDetailWithMaid(
+                trimmedMaid,
+                dxApiUrl,
+                dxApiKey,
+            );
+
+            if (!response || response.success === false) {
+                return response || { success: false, message: 'Unable to load beneficiary details.' };
+            }
+
+            const dbConfig = tenantConfig.config?.database;
+
+            // Check MSSQL for latest HomeCountry name
+            if (dbConfig && response?.data) {
+                const dbStart = Date.now();
+                try {
+                    const pool = await this.sqlServerService.getPool(dbConfig);
+                    const dbResult = await pool.request()
+                        .input('maid', trimmedMaid)
+                        .query(`
+                            SELECT TOP 1 cm.CountryName AS HomeCountryName
+                            FROM Lawton.dbo.tblmabeneficiary b WITH (NOLOCK)
+                            INNER JOIN Lawton.dbo.tblmamemberpolicy mp WITH (NOLOCK) 
+                                ON (b.benefMemberPolicyId = mp.MemberPolId OR b.BenefPolID = mp.MemberPolId)
+                            INNER JOIN Lawton.dbo.tbl_Country_Master cm WITH (NOLOCK) 
+                                ON mp.HomeCountry = cm.CountryId
+                            WHERE b.BenefMediAssistID = @maid
+                        `);
+
+                    if (dbResult.recordset.length > 0 && dbResult.recordset[0].HomeCountryName) {
+                        response.data.home_country = dbResult.recordset[0].HomeCountryName;
+                    }
+
+                    this.logger.debug(
+                        `Fetched MSSQL home country in ${Date.now() - dbStart}ms`,
+                        HRService.name,
+                        { maid: trimmedMaid, homeCountry: dbResult.recordset[0]?.HomeCountryName },
+                    );
+                } catch (error) {
+                    const err = error instanceof Error ? error : new Error(String(error));
+                    const durationMs = Date.now() - dbStart;
+                    this.logger.warn(
+                        `Failed fetching HomeCountryName from MSSQL after ${durationMs}ms: ${err.message}`,
+                        HRService.name,
+                        { tenantId: normalizedTenantId, maid: trimmedMaid },
+                    );
+                }
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(`Beneficiary detail retrieved successfully in ${durationMs}ms`, HRService.name, {
+                tenantId: normalizedTenantId,
+                maid: trimmedMaid,
+            });
+
+            return response;
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching beneficiary detail after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, maid: trimmedMaid },
+            );
+            return { success: false, message: 'Unable to load beneficiary details.' };
+        }
     }
 }

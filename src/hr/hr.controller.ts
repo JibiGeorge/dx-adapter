@@ -169,4 +169,21 @@ export class HRController {
 
         return this.hrService.getClientDetails(tenantId, user, query);
     }
+
+    @Get('beneficiary-detail/:maid')
+    async getBeneficiaryDetail(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Param('maid') maid: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        if (!maid?.trim()) {
+            throw new BadRequestException('maid parameter is required');
+        }
+
+        return this.hrService.getBeneficiaryDetail(tenantId, user, maid);
+    }
 }

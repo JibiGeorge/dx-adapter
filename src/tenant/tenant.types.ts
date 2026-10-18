@@ -90,6 +90,7 @@ export interface TenantInternalConfig {
   additionalConfigs: TenantAdditionalConfigs;
   dataexchange: {
     api: string;
+    key: string;
   }
 }
 
