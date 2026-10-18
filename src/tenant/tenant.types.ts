@@ -46,6 +46,7 @@ export interface TenantClaimApisConfig {
   v2Key: string;
   v3: string;
   pairKey: string;
+  proclaimApiUrl: string;
 }
 
 export interface TenantDatabaseConfig {

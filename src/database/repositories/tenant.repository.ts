@@ -75,6 +75,7 @@ export class TenantRepository {
           v2Key: doc.config?.claimApis?.v2Key ?? '',
           v3: doc.config?.claimApis?.v3 ?? '',
           pairKey: doc.config?.claimApis?.pairKey ?? '',
+          proclaimApiUrl: doc.config?.claimApis?.proclaimApiUrl ?? ''
         },
 
         database: {

@@ -8,9 +8,10 @@ import { TenantModule } from "../tenant/tenant.module.js";
 import { BrokerModule } from "../broker/broker.module.js";
 import { DatabaseModule } from "../database/database.module.js";
 import { DXApiModule } from "../integrations/dx-api/dx-api.module.js";
+import { ProclaimApiModule } from "../integrations/proclaim-api/proclaim-api.module.js";
 
 @Module({
-  imports: [AuthModule, ClaimApiModule, EcardApiModule, TenantModule, BrokerModule, DatabaseModule, DXApiModule],
+  imports: [AuthModule, ClaimApiModule, EcardApiModule, TenantModule, BrokerModule, DatabaseModule, DXApiModule, ProclaimApiModule],
   controllers: [HRController],
   providers: [HRService],
   exports: [HRService],

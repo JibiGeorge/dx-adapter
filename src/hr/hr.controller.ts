@@ -10,6 +10,7 @@ import { GetCorpDto } from "./dto/corp.dto.js";
 import { UpdateBeneficiaryDetailsDto } from "./dto/beneficiary.dto.js";
 import { DownloadEcardDto, SearchEcardDetailsDto, ViewCoverageLetterDto, ViewEcardDto } from "./dto/ecard.dto.js";
 import { HospitalSearchDto } from "./dto/hospital.dto.js";
+import { PowerBIDto } from "./dto/powerbi.dto.js";
 
 @Controller('hr')
 @UseGuards(JwtAuthGuard, HRRoleGuard)
@@ -530,5 +531,18 @@ export class HRController {
         }
 
         return this.hrService.getReports(tenantId, user);
+    }
+
+    @Post('powerbi')
+    async getPowerBIData(
+        @Headers('x-tenant-id') tenantId: string,
+        @Body() body: PowerBIDto,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const dashboardType = body?.dashboardType || (body as any)?.dashboardtype || '';
+        return this.hrService.getPowerBIData(tenantId, dashboardType);
     }
 }

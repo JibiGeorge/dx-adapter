@@ -13,6 +13,7 @@ import { BrokerService } from "../broker/broker.service.js";
 import { SqlServerService } from "../database/sql-server.service.js";
 import { DXApiService } from "../integrations/dx-api/dx-api.service.js";
 import { EcardApiService } from "../integrations/ecard-api/ecard-api.service.js";
+import { ProclaimApiService } from "../integrations/proclaim-api/proclaim-api.service.js";
 import { TENANTS } from "../../utils/tentant-helper.js";
 
 interface PolicyBeneficiariesParams {
@@ -96,6 +97,7 @@ export class HRService {
         private readonly sqlServerService: SqlServerService,
         private readonly dxApiService: DXApiService,
         private readonly ecardApiService: EcardApiService,
+        private readonly proclaimApiService: ProclaimApiService,
     ) { }
 
     async getHRData(tenantId: string, user: UserSessionPayload): Promise<HRDashboardResponse> {
@@ -4724,6 +4726,62 @@ export class HRService {
             return {
                 error: 'Internal server error loading reports',
             };
+        }
+    }
+
+    async getPowerBIData(
+        tenantId: string,
+        dashboardType: string,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        if (!dashboardType?.trim()) {
+            return { error: 'dashboardType is required' };
+        }
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const hrDashboards = tenantConfig?.config?.additionalConfigs?.hrDashboards || [];
+            const allowedDashboards = hrDashboards.map((d: any) => d.key);
+
+            if (allowedDashboards.length > 0 && !allowedDashboards.includes(dashboardType)) {
+                return { error: 'Unsupported dashboard type' };
+            }
+
+            const proclaimApiUrl = tenantConfig?.config?.claimApis?.proclaimApiUrl || '';
+
+            if (!proclaimApiUrl) {
+                this.logger.error('Proclaim API URL is not configured for tenant', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { error: 'Proclaim API URL is not configured' };
+            }
+
+            const data = await this.proclaimApiService.getPowerBIData(
+                dashboardType,
+                proclaimApiUrl,
+                normalizedTenantId,
+            );
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Power BI data fetched successfully for dashboardType: ${dashboardType} in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, dashboardType },
+            );
+
+            return { success: true, data };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching HR Power BI data after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, dashboardType },
+            );
+            return { error: 'Internal server error loading Power BI dashboard' };
         }
     }
 }
