@@ -240,7 +240,12 @@ export class ClaimApiService {
     const cleanUrl = baseUrl.replace(/\/+$/, '');
     const endpoint = `${cleanUrl}/api/v2/BeneficiarySearch/.json`;
 
-    console.log("payload",payload)
+    this.logger.debug('Searching beneficiaries', ClaimApiService.name, {
+      endpoint,
+      tenantId,
+      payload,
+    });
+
     const response = await this.httpService.post<AgentPolicySearchResponse>(endpoint, payload, {
       headers: {
         'Content-Type': 'application/json',
@@ -250,7 +255,11 @@ export class ClaimApiService {
       },
     });
 
-    console.log("response",response)
+    this.logger.debug('Searched beneficiaries successfully', ClaimApiService.name, {
+      endpoint,
+      tenantId,
+      hasResponse: Boolean(response),
+    });
 
     return response;
   }
@@ -259,20 +268,114 @@ export class ClaimApiService {
     const cleanUrl = baseUrl.replace(/\/+$/, '');
     const endpoint = `${cleanUrl}/FetchMemberPolicyDeatils`;
 
-    const response = await this.httpService.post<AgentPolicySearchResponse>(endpoint, payload, {
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CA-SHARED-KEY': accessKey,
-        'Payer': tenantId,
-      },
+    this.logger.debug('Fetching member policy details', ClaimApiService.name, {
+      endpoint,
+      tenantId,
+      payload,
     });
 
-    if (!response.ok) {
-      const errorText = await response;
-      this.logger.error(`Failed fetch member policy details ${response.status}: ${errorText}`);
-      throw new Error(`Failed Fetch Member Policy Details: ${response.statusText}`);
-    }
+    try {
+      const response = await this.httpService.post<any>(endpoint, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CA-SHARED-KEY': accessKey,
+          'Payer': tenantId,
+        },
+      });
 
-    return response;
+      this.logger.debug('Fetched member policy details successfully', ClaimApiService.name, {
+        endpoint,
+        tenantId,
+        hasResponse: Boolean(response),
+      });
+
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `Failed to fetch member policy details: ${err.message}`,
+        err.stack,
+        ClaimApiService.name,
+        { endpoint, tenantId, payload },
+      );
+      throw error;
+    }
+  }
+
+  async fetchPolicyDetails(baseUrl: string, payload: any, accessKey: string, tenantId: string) {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/FetchPolicyDetails`;
+
+    this.logger.debug('Fetching policy details', ClaimApiService.name, {
+      endpoint,
+      tenantId,
+      payload,
+    });
+
+    try {
+      const response = await this.httpService.post<any>(endpoint, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CA-SHARED-KEY': accessKey,
+          'Payer': tenantId,
+        },
+      });
+
+      this.logger.debug('Fetched policy details successfully', ClaimApiService.name, {
+        endpoint,
+        tenantId,
+        hasResponse: Boolean(response),
+      });
+
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `Failed to fetch policy details: ${err.message}`,
+        err.stack,
+        ClaimApiService.name,
+        { endpoint, tenantId, payload },
+      );
+      throw error;
+    }
+  }
+
+  async getPolicyDocuments(baseUrl: string, accessKey: string, tenantId: string, payload: any) {
+    const cleanUrl = baseUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/api/v2/policy/attachments/`;
+
+    this.logger.debug('Fetching policy documents', ClaimApiService.name, {
+      endpoint,
+      tenantId,
+      payload,
+    });
+
+    try {
+      const response = await this.httpService.post<any>(endpoint, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CA-SHARED-KEY': accessKey,
+          'Payer': tenantId,
+          'LoadArchive': 'False',
+        },
+      });
+
+      this.logger.debug('Fetched policy documents successfully', ClaimApiService.name, {
+        endpoint,
+        tenantId,
+        hasResponse: Boolean(response),
+      });
+
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `Failed to fetch policy documents: ${err.message}`,
+        err.stack,
+        ClaimApiService.name,
+        { endpoint, tenantId, payload },
+      );
+      throw error;
+    }
   }
 }

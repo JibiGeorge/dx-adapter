@@ -6,7 +6,7 @@ import { TenantConfigTypes } from "../tenant/tenant.types.js";
 import { TenantService } from "../tenant/tenant.service.js";
 import { LAWTON_TENANT_ID } from "../broker/broker.constants.js";
 import { HRDashboardResponse, HRStatusResponse, SubCorpItem } from "./hr.types.js";
-import { formatDateDDMMYYYY, parseDotNetDate } from "../../utils/date-helper.js";
+import { formatDateDDMMYYYY, formatDateString, parseDotNetDate } from "../../utils/date-helper.js";
 import { GetCorpDto } from "./dto/corp.dto.js";
 import { BrokerService } from "../broker/broker.service.js";
 import { SqlServerService } from "../database/sql-server.service.js";
@@ -1376,5 +1376,178 @@ export class HRService {
             );
             return { error: 'Internal server error searching beneficiaries' };
         }
+    }
+
+    async getClientDetails(
+        tenantId: string, user: UserSessionPayload, query: {
+            maid: string;
+            empCode?: string;
+            polId: string;
+            memberPolId?: string;
+        }
+    ) {
+        const startedAt = Date.now();
+        const { maid, empCode, polId, memberPolId } = query;
+        if (!maid || !polId) {
+            return { error: 'maid and polId are required' }
+        }
+
+        try {
+            const polIdNum = Number(polId);
+            const effectiveEmpCode = String(empCode || '');
+
+            const normalizedTenantId = tenantId.trim();
+            const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(normalizedTenantId);
+
+            if (!tenantConfig) {
+                this.logger.error(
+                    `Tenant config not found for tenant: ${normalizedTenantId}`,
+                    undefined,
+                    HRService.name,
+                    { tenantId: normalizedTenantId, userId: user?.userId },
+                );
+                throw new InternalServerErrorException('Tenant not found');
+            }
+            const payload = {
+                masterPolicyId: polIdNum,
+                employeeCode: effectiveEmpCode,
+                dbType: 'MA',
+            }
+            const memberPolicyRes = await this.claimService.fetchMemberPolicyDetails(tenantConfig.config.claimApis.v3, payload, tenantConfig.config.claimApis.v2, tenantId);
+            const details: any = memberPolicyRes?.memberPolicyDetails || [];
+
+            // Find the policy detail that matches polId and contains the clicked beneficiary
+            let detail = details.find((d: any) =>
+                d.masterPolicyId === polIdNum &&
+                d.memberCreationInCMSRequest?.memberCreationInCMSs?.beneficiary?.some(
+                    (b: any) => String(b.mediAssistID) === String(maid)
+                )
+            );
+            if (!detail) detail = details.find((d: any) => d.masterPolicyId === polIdNum);
+            if (!detail) detail = details[0] || null;
+
+            if (!detail) {
+                let fallbackConfig: any = null;
+                try {
+                    const payload = { policyId: polIdNum };
+                    fallbackConfig = polIdNum > 0 ? await this.claimService.fetchPolicyDetails(tenantConfig.config.claimApis.v3, payload, tenantConfig.config.claimApis.v2, tenantId) : null;
+                } catch (error) {
+                    this.logger.warn(`Failed fallback fetchPolicyDetails: ${(error as Error).message}`, HRService.name);
+                }
+
+                detail = {
+                    masterPolicyId: polIdNum,
+                    memberPolId: Number(memberPolId) || 0,
+                    memberPolno: '',
+                    masterPolicyNo: fallbackConfig?.policyNo || fallbackConfig?.insurerPolNo || '',
+                    masterPolStartDate: fallbackConfig?.policyStartDate || '',
+                    masterPolEndDate: fallbackConfig?.policyEndDate || '',
+                    insuranceCompany: fallbackConfig?.insuranceCompName || '',
+                    planName: fallbackConfig?.planDetailsBase?.[0]?.planDetails?.planName || 'IPMI',
+                    planType: 'Long Term Plan',
+                    aliasName: 'Base Policy',
+                    memberPolicyStatus: 'Active Current',
+                    insurerid: Number(fallbackConfig?.insuranceCompId || 0),
+                    employeeCode: effectiveEmpCode,
+                    memberCreationInCMSRequest: {
+                        memberCreationInCMSs: {
+                            beneficiary: [
+                                {
+                                    mediAssistID: Number(maid),
+                                    relationToPrimaryBeneficiaryId: 1,
+                                    relationName: 'Insured',
+                                    policyId: polIdNum,
+                                }
+                            ]
+                        }
+                    }
+                };
+            }
+
+            // Enrich with policy documents
+            let docs: any = [];
+            try {
+                const payload = {
+                    policyIds: [polIdNum], dbType: 'MA'
+                }
+                const docsRes = await this.claimService.getPolicyDocuments(tenantConfig.config.claimApis.v2, tenantConfig.config.claimApis.v2Key, tenantId, payload);
+                docs = docsRes?.documents || docsRes?.Documents || docsRes?.attachments || [];
+            } catch (_) { /* non-fatal */ }
+
+            // Mirrors GetBenefDetails — FetchPolicyDetails config tags decide whether
+            // the E-Card / COI actions are offered (ShowECardForHR / ShowCOIForHR,
+            // the broker portal uses the *ForBroker variants).
+            let showEcard = false;
+            let showCOI = false;
+            let policyConfig: any = null;
+            try {
+                const masterPolId = Number(detail.masterPolicyId) || polIdNum;
+                const payload = { policyId: masterPolId }
+                policyConfig = masterPolId > 0 ? await this.claimService.fetchPolicyDetails(tenantConfig.config.claimApis.v3, payload, tenantConfig.config.claimApis.v2, tenantId) : null;
+                showEcard = this.hasPolicyConfigTag(policyConfig?.eCardConfig || policyConfig?.extraDetails?.eCardConfig, 'ShowECardForHR');
+                showCOI = this.hasPolicyConfigTag(policyConfig?.coiConfig || policyConfig?.extraDetails?.coiConfig, 'ShowCOIForHR');
+            } catch (_) { /* non-fatal — buttons stay hidden, mirroring ViewBag defaults */ }
+
+            const firstBenef = detail.memberCreationInCMSRequest?.memberCreationInCMSs?.beneficiary?.[0] || {};
+
+            return {
+                success: true,
+                detail: {
+                    showEcard,
+                    showCOI,
+                    masterPolicyId: detail.masterPolicyId,
+                    memberPolId: detail.memberPolId || Number(memberPolId) || 0,
+                    memberPolno: detail.memberPolno || '',
+                    masterPolicyNo: policyConfig?.policyNo || policyConfig?.insurerPolNo || detail.MasterPolicyNo || detail.masterPolicyNo || '',
+                    masterPolStartDate: formatDateString(policyConfig?.policyStartDate) || formatDateString(detail.masterPolStartDate) || '',
+                    masterPolEndDate: formatDateString(policyConfig?.policyEndDate) || formatDateString(detail.masterPolEndDate) || '',
+                    insuranceCompany: detail.insurer || detail.insuranceCompany || '',
+                    planName: firstBenef.planType || policyConfig?.planDetailsBase?.[0]?.planDetails?.planName || detail.planName || 'IPMI',
+                    planType: detail.PlanType || detail.planType || 'Long Term Plan',
+                    aliasName: detail.aliasName || '',
+                    memberPolicyStatus: detail.memberPolicyStatus || '',
+                    insurerid: Number(detail.insurerid || policyConfig?.insuranceCompId || 0),
+                    employeeCode: detail.employeeCode || effectiveEmpCode,
+                    beneficiaries: (detail.memberCreationInCMSRequest?.memberCreationInCMSs?.beneficiary || []).map((b: any) => {
+                        const relId = Number(b.relationToPrimaryBeneficiaryId || b.relationToPrimaryBeneficiaryID || 0);
+                        let relationName = b.relationName || '';
+                        if (!relationName || relationName.trim() === '') {
+                            if ([1, 13].includes(relId)) relationName = 'Insured';
+                            else if ([6, 9, 17].includes(relId)) relationName = 'Spouse';
+                            else if ([4, 8, 18, 19, 20, 21, 22, 24, 28, 29, 30].includes(relId)) relationName = 'Child';
+                            else if ([2, 5, 11, 12].includes(relId)) relationName = 'Parent';
+                            else relationName = relId === 0 ? 'Insured' : 'Others';
+                        } else if (relationName.trim().toLowerCase() === 'self') {
+                            relationName = 'Insured';
+                        }
+                        return {
+                            mediAssistID: b.mediAssistID,
+                            name: [b.name, b.middleName, b.lastName].filter(Boolean).join(' ').trim(),
+                            relationName,
+                            policyId: b.policyId,
+                            memberPolicyId: b.memberPolicyId || b.MemberPolicyId || detail.memberPolId || 0,
+                            priBeneficiaryId: b.priBeneficiaryId || b.priBenefId || 0,
+                            benefUserID: b.benefUserID || b.benefUserId || 0,
+                            pihNumber: b.insurerMemberId || b.pihNumber || '',
+                        };
+                    }),
+                    docs,
+                },
+            }
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching client detail after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+            );
+            return { error: 'Internal server error fetching client detail' };
+        }
+    }
+
+    private hasPolicyConfigTag(configList: any, tagName: string): boolean {
+        return Array.isArray(configList) &&
+            configList.some((c: any) => String(c?.tagName || '').trim() === tagName && String(c?.tagValue || '').trim() === '1');
     }
 }

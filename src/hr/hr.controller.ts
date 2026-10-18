@@ -151,4 +151,22 @@ export class HRController {
 
         return this.hrService.beneficiariesSearch(tenantId, user, host, query);
     }
+
+    @Get('client-detail')
+    async getClientDetails(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Query() query: {
+            maid: string;
+            empCode?: string;
+            polId: string;
+            memberPolId?: string;
+        },
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getClientDetails(tenantId, user, query);
+    }
 }
