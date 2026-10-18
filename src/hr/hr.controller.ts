@@ -470,4 +470,16 @@ export class HRController {
 
         return this.hrService.getEmployeePolicies(tenantId, user, empCode, corpIdOverride);
     }
+
+    @Get('network-hospital')
+    async getNetworkHospital(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getNetworkHospital(tenantId, user);
+    }
 }

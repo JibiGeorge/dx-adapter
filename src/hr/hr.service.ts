@@ -4377,4 +4377,94 @@ export class HRService {
             return { error: 'Internal server error' };
         }
     }
+
+    async getNetworkHospital(
+        tenantId: string,
+        user: UserSessionPayload,
+    ): Promise<any> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+
+        this.logger.debug(
+            `Fetching network hospital data for tenant: ${normalizedTenantId}`,
+            HRService.name,
+            { tenantId: normalizedTenantId },
+        );
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            if (!tenantConfig) {
+                return { success: false, message: 'Tenant not found' };
+            }
+
+            const componentUrl = tenantConfig.config?.networkHospitalComponentUrl || '';
+
+            let insurerNames: string[] = [];
+
+            if (!componentUrl) {
+                // Fallback UI only — collect insurer names from the broker's agent-code policies
+                try {
+                    const brokerId = String((user as any)?.brokerId || '');
+                    const rawAllowed = tenantConfig.config?.additionalConfigs?.allowedTPAIds;
+                    const allowedTPAIds: string[] = Array.isArray(rawAllowed)
+                        ? rawAllowed
+                        : rawAllowed
+                            ? String(rawAllowed).split(',').map((id: string) => id.trim()).filter(Boolean)
+                            : [];
+                    const v1Url =
+                        tenantConfig.config?.claimApis?.v1 ||
+                        tenantConfig.config?.claimApis?.v1Lawton;
+
+                    if (brokerId && v1Url) {
+                        const resp = await this.claimService.searchPoliciesByAgent(
+                            brokerId,
+                            allowedTPAIds,
+                            v1Url,
+                        );
+                        const headers: any[] =
+                            resp?.PolicyHeaders || (resp as any)?.policyHeaders || [];
+                        insurerNames = [
+                            ...new Set(
+                                headers
+                                    .map((p: any) =>
+                                        String(p.InsuranceCompany ?? p.insuranceCompany ?? ''),
+                                    )
+                                    .filter(Boolean),
+                            ),
+                        ];
+                    }
+                } catch (err) {
+                    const error = err instanceof Error ? err : new Error(String(err));
+                    this.logger.warn(
+                        `searchPoliciesByAgent failed for network hospital fallback: ${error.message}`,
+                        HRService.name,
+                    );
+                }
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Network hospital data retrieved in ${durationMs}ms`,
+                HRService.name,
+                { hasComponentUrl: Boolean(componentUrl), insurerCount: insurerNames.length },
+            );
+
+            return {
+                success: true,
+                componentUrl,
+                insurerNames,
+                mapKey: process.env.MAP_KEY || '',
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching network hospital data after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId },
+            );
+            return { success: false, error: 'Internal server error' };
+        }
+    }
 }
