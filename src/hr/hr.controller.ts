@@ -851,4 +851,26 @@ export class HRController {
             : (result.message?.includes('No file') || result.message?.includes('Allowed Profile') ? 400 : 500);
         return res.status(status).json(result);
     }
+
+    @Get('profile/image')
+    async getProfileImage(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Query('filepath') filepath: string,
+        @Res() res: Response,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            return res.status(400).send('x-tenant-id header is required');
+        }
+
+        const result = await this.hrService.getProfileImage(tenantId, user, filepath);
+
+        if ('error' in result) {
+            return res.status(result.statusCode).send(result.error);
+        }
+
+        res.setHeader('Content-Type', result.contentType);
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        return res.status(200).send(result.buffer);
+    }
 }

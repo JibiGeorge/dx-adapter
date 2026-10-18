@@ -6282,4 +6282,95 @@ export class HRService {
             return { isSuccess: false, message: 'Internal server error during upload.' };
         }
     }
+
+    async getProfileImage(
+        tenantId: string,
+        user: UserSessionPayload,
+        rawFilepath: string,
+    ): Promise<
+        | { buffer: Buffer; contentType: string }
+        | { error: string; statusCode: number }
+    > {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+
+        try {
+            if (!rawFilepath || typeof rawFilepath !== 'string') {
+                return { error: 'Filepath is required.', statusCode: 400 };
+            }
+
+            const portalName = user?.activePortal || 'hr';
+            let filepath = rawFilepath.trim();
+            if (filepath.includes('filepath=')) {
+                filepath = filepath.split('filepath=')[1];
+            } else if (filepath.includes('/')) {
+                const parts = filepath.split('/');
+                filepath = parts[parts.length - 1];
+            }
+            filepath = filepath.split('&')[0].split('?')[0].split('#')[0].replace(/^\/+|\/+$/g, '');
+            const cleanFileName = path.basename(filepath);
+
+            const getContentType = (fname: string): string => {
+                const l = fname.toLowerCase();
+                if (l.endsWith('.png')) return 'image/png';
+                if (l.endsWith('.gif')) return 'image/gif';
+                if (l.endsWith('.pdf')) return 'application/pdf';
+                return 'image/jpeg';
+            };
+
+            // 1. Check local uploads directory
+            const localFilePath = path.join(process.cwd(), 'uploads', 'profile-pics', cleanFileName);
+            if (fs.existsSync(localFilePath)) {
+                const buffer = fs.readFileSync(localFilePath);
+                return { buffer, contentType: getContentType(cleanFileName) };
+            }
+
+            // 2. Check userProfileStore for stored base64 image data for this portal scope
+            if (user?.loginName) {
+                const overrides = await this.userProfileRepo.getProfileOverrides(user.loginName, portalName);
+                if (overrides.profileImgData) {
+                    const buffer = Buffer.from(overrides.profileImgData, 'base64');
+                    return { buffer, contentType: getContentType(cleanFileName) };
+                }
+            }
+
+            // 3. Fallback: try downloading from upstream DMS via integration service
+            try {
+                const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(normalizedTenantId);
+                const dmsHostUrl = process.env.DMS_HOST_URL || 'https://uat-lawton-dms.lawtonasia.com';
+                const mbAppId = process.env.MB_APP_ID || String(tenantConfig?.config?.auth?.appId || '9240');
+                const mbAppUrl = process.env.MB_APP_URL || 'https://uat-maglobal.lawtonasia.com/';
+
+                const dmsRes = await this.claimService.downloadDmsFile(
+                    cleanFileName,
+                    dmsHostUrl,
+                    mbAppId,
+                    mbAppUrl,
+                );
+
+                if (dmsRes?.fileBytes) {
+                    const buffer = Buffer.from(dmsRes.fileBytes, 'base64');
+                    return { buffer, contentType: getContentType(dmsRes.fileName || cleanFileName) };
+                }
+            } catch (dmsErr: any) {
+                this.logger.debug(
+                    `DMS fallback download attempt failed: ${dmsErr?.message}`,
+                    HRService.name,
+                    { cleanFileName },
+                );
+            }
+
+            return { error: 'Image content not found.', statusCode: 404 };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error downloading profile picture after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, rawFilepath },
+            );
+            return { error: 'Internal server error.', statusCode: 500 };
+        }
+    }
 }

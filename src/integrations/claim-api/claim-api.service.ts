@@ -492,13 +492,18 @@ export class ClaimApiService {
     return response;
   }
 
-  async downloadDmsFile(fileGuid: string): Promise<{ fileName: string; fileBytes: string }> {
-    const dmsHost = process.env.DMS_HOST_URL || 'http://coredms.medibuddy.in/';
-    const appId = process.env.MB_APP_ID || '9192';
-    const appUrl = process.env.MB_APP_URL || 'https://portal.medibuddy.in/';
+  async downloadDmsFile(
+    fileGuid: string,
+    dmsHostOverride?: string,
+    appIdOverride?: string,
+    appUrlOverride?: string,
+  ): Promise<{ fileName: string; fileBytes: string }> {
+    const dmsHost = dmsHostOverride || process.env.DMS_HOST_URL || 'https://uat-lawton-dms.lawtonasia.com';
+    const appId = appIdOverride || process.env.MB_APP_ID || '9240';
+    const appUrl = appUrlOverride || process.env.MB_APP_URL || 'https://uat-maglobal.lawtonasia.com/';
 
     const cleanHost = dmsHost.replace(/\/+$/, '');
-    const endpoint = `${cleanHost}/DownloadFile`;
+    const endpoint = `${cleanHost}/DownloadFile?format=json`;
 
     this.logger.debug(`Calling DMS DownloadFile for fileGuid: ${fileGuid}`, ClaimApiService.name, {
       endpoint,
@@ -507,19 +512,43 @@ export class ClaimApiService {
     });
 
     try {
-      const response = await this.httpService.post<{ fileName: string; fileBytes: string }>(
-        endpoint,
-        { FileIdentifier: fileGuid },
-        {
+      let dlRes = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          mbappid: appId,
+          mbappurl: appUrl,
+        },
+        body: JSON.stringify({ FileIdentifier: fileGuid }),
+      });
+
+      if (!dlRes.ok) {
+        const getEndpoint = `${cleanHost}/DownloadFile?FileIdentifier=${encodeURIComponent(fileGuid)}&filepath=${encodeURIComponent(fileGuid)}&format=json`;
+        dlRes = await fetch(getEndpoint, {
+          method: 'GET',
           headers: {
-            'Content-Type': 'application/json',
+            'Accept': 'application/json',
             mbappid: appId,
             mbappurl: appUrl,
           },
-        },
-      );
+        });
+      }
 
-      return response;
+      if (dlRes.ok) {
+        const textData = await dlRes.text();
+        try {
+          const data = JSON.parse(textData);
+          const fileBytes = data?.FileBytes || data?.fileBytes || '';
+          const fileName = data?.FileName || data?.fileName || fileGuid;
+          return { fileName, fileBytes };
+        } catch {
+          const fileBytes = Buffer.from(textData, 'binary').toString('base64');
+          return { fileName: fileGuid, fileBytes };
+        }
+      }
+
+      throw new Error(`DMS download failed with status ${dlRes.status}`);
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
       this.logger.error(
