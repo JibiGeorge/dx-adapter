@@ -1,6 +1,6 @@
-import { All, BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, Res, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
+import { All, BadRequestException, Body, Controller, Get, Headers, Ip, Param, Post, Query, Req, Res, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
-import type { Response } from "express";
+import type { Request, Response } from "express";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard.js";
 import { HRRoleGuard } from "../../common/guards/hr-role.guard.js";
 import { HRService } from "./hr.service.js";
@@ -16,6 +16,7 @@ import { PowerBIDto } from "./dto/powerbi.dto.js";
 import { EnrollmentStatusQueryDto } from "./dto/enrollment-status.dto.js";
 import { EnrollmentOperationDto } from "./dto/enrollment-operation.dto.js";
 import type { UpdateProfileDto } from "./dto/update-profile.dto.js";
+import type { ChangePasswordDto } from "./dto/change-password.dto.js";
 
 @Controller('hr')
 @UseGuards(JwtAuthGuard, HRRoleGuard)
@@ -872,5 +873,27 @@ export class HRController {
         res.setHeader('Content-Type', result.contentType);
         res.setHeader('Cache-Control', 'public, max-age=86400');
         return res.status(200).send(result.buffer);
+    }
+
+    @Post('profile/change-password')
+    async changePassword(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Req() req: Request,
+        @Ip() ip: string,
+        @Body() body: ChangePasswordDto,
+        @Res() res: Response,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            return res.status(400).json({ isSuccess: false, message: 'x-tenant-id header is required' });
+        }
+
+        const clientIp = req.ip || ip || '';
+        const result = await this.hrService.changePassword(tenantId, user, clientIp, body);
+        const status = result.statusCode || (result.isSuccess ? 200 : 500);
+        return res.status(status).json({
+            isSuccess: result.isSuccess,
+            message: result.message,
+        });
     }
 }

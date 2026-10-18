@@ -18,6 +18,7 @@ import { ProclaimApiService } from "../integrations/proclaim-api/proclaim-api.se
 import { TENANTS } from "../../utils/tentant-helper.js";
 import { JwtService } from "@nestjs/jwt";
 import { UpdateProfileDto } from "./dto/update-profile.dto.js";
+import { ChangePasswordDto } from "./dto/change-password.dto.js";
 import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
@@ -6371,6 +6372,106 @@ export class HRService {
                 { tenantId: normalizedTenantId, rawFilepath },
             );
             return { error: 'Internal server error.', statusCode: 500 };
+        }
+    }
+
+    async changePassword(
+        tenantId: string,
+        user: UserSessionPayload,
+        clientIp: string,
+        body: ChangePasswordDto,
+    ): Promise<{
+        isSuccess: boolean;
+        message: string;
+        statusCode?: number;
+    }> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+
+        try {
+            const { oldPassword, newPassword } = body || {};
+
+            if (!oldPassword || !newPassword) {
+                return {
+                    isSuccess: false,
+                    message: 'Old password and new password are required.',
+                    statusCode: 400,
+                };
+            }
+
+            const complexRegex =
+                /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[~!#$@%^&*()_+|\\'\-={}[\]:";<>?,.\/])[A-Za-z\d~!#$@%^&*()_+|\\'\-={}[\]:";<>?,.\/]{8,}/;
+            if (!complexRegex.test(newPassword)) {
+                return {
+                    isSuccess: false,
+                    message:
+                        'Password must contain at least 8 characters with at least one uppercase, one lowercase, one digit and one special character.',
+                    statusCode: 200,
+                };
+            }
+
+            const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const mediAuthUrl =
+                process.env.MEDIAUTH_URL ||
+                tenantConfig?.config?.auth?.api ||
+                '';
+            const appId =
+                process.env.APPLICATION_ID ||
+                tenantConfig?.config?.auth?.appId ||
+                '9192';
+
+            const cleanMediAuthUrl = mediAuthUrl.replace(/\/$/, '');
+            const endpoint = `${cleanMediAuthUrl}/ChangePassword/UserName`;
+
+            const resp = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    newPassword,
+                    oldPassword,
+                    retypePassword: newPassword,
+                    resetToken: '',
+                    userName: user?.loginName || '',
+                    ipAddress: clientIp || '',
+                    applicationId: appId,
+                    providers: ['IWP', 'Medibuddy'],
+                }),
+            });
+
+            const data: any = await resp.json().catch(() => ({}));
+            const durationMs = Date.now() - startedAt;
+            this.logger.log(
+                `ChangePassword response: status=${resp.status}, isSuccess=${data?.IsSuccess ?? data?.isSuccess} after ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, loginName: user?.loginName, status: resp.status },
+            );
+
+            if (resp.ok && (data?.IsSuccess || data?.isSuccess)) {
+                return { isSuccess: true, message: 'Password changed successfully.', statusCode: 200 };
+            }
+
+            return {
+                isSuccess: false,
+                message:
+                    data?.Message ||
+                    data?.message ||
+                    'Password change failed. Please check your old password and try again.',
+                statusCode: 200,
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error changing password after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            return {
+                isSuccess: false,
+                message: 'Internal server error. Please try again.',
+                statusCode: 500,
+            };
         }
     }
 }
