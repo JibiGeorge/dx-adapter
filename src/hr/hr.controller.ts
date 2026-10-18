@@ -251,4 +251,21 @@ export class HRController {
         return this.hrService.getActiveClaimDetail(tenantId, user, claimId, dbType, refNo);
     }
 
+    @Get('past-claim-detail/:claimId')
+    async getPastClaimDetail(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Headers('host') host: string,
+        @Param('claimId') claimId: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        if (!claimId?.trim()) {
+            throw new BadRequestException('claimId parameter is required');
+        }
+
+        return this.hrService.getPastClaimDetail(tenantId, user, host, claimId);
+    }
 }

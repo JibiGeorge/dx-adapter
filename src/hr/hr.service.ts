@@ -2446,4 +2446,111 @@ export class HRService {
             return { success: false, error: 'Unable to load claim detail. Please try again.' };
         }
     }
+
+    async getPastClaimDetail(tenantId: string, user: UserSessionPayload, host: string, claimId: string) {
+        const startedAt = Date.now();
+        const normalizedTenantId = String(tenantId || '').trim();
+        const normalizedHost = (host || '').toLowerCase();
+        const trimmedClaimId = String(claimId || '').trim();
+
+        if (!trimmedClaimId) {
+            return { success: false, error: 'claimId parameter is required' };
+        }
+
+        const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(normalizedTenantId);
+
+        if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            throw new InternalServerErrorException('Tenant not found');
+        }
+
+        const dbConfig = tenantConfig.config?.database;
+        const macpDb = tenantConfig.config?.macpDb || 'MACP';
+
+        if (!dbConfig) {
+            this.logger.warn('Database configuration not found for past claim detail', HRService.name, {
+                tenantId: normalizedTenantId,
+            });
+            return { success: false, error: 'Database configuration missing' };
+        }
+
+        try {
+            const corpIds = await this.brokerService.resolveBrokerCorpIds(user, tenantConfig, normalizedHost);
+
+            this.logger.debug('Fetching past claim detail from DB', HRService.name, {
+                tenantId: normalizedTenantId,
+                claimId: trimmedClaimId,
+                corpIds,
+                macpDb,
+            });
+
+            const pool = await this.sqlServerService.getPool(dbConfig);
+            const dbReq = pool.request();
+            dbReq.input('ClaimID', trimmedClaimId);
+
+            let whereClause = 'ClaimID = @ClaimID';
+            if (corpIds.length > 0) {
+                const corpParams = corpIds.map((id, i) => {
+                    dbReq.input(`PMCorpId${i}`, id);
+                    return `@PMCorpId${i}`;
+                });
+                whereClause += ` AND PMCorpId IN (${corpParams.join(', ')})`;
+            }
+
+            const query = `SELECT TOP 1 * FROM ${macpDb}.dbo.tblPc_Employees WITH (NOLOCK) WHERE ${whereClause}`;
+            const dbRes = await dbReq.query(query);
+            const row = dbRes.recordset?.[0];
+
+            if (!row) {
+                this.logger.warn(`Past claim not found: ${trimmedClaimId}`, HRService.name, {
+                    tenantId: normalizedTenantId,
+                    claimId: trimmedClaimId,
+                    corpIds,
+                });
+                return { success: false, error: 'Past claim not found' };
+            }
+
+            const detail = {
+                claimId: row.ClaimID || row.TPAID || '',
+                employeeName: row.EmpName || '',
+                patientName: row.NameOfPatient || row.EmpName || '',
+                empCode: row.EmpId || '',
+                hospitalName: row.Name_Of_Hospital || '',
+                claimType: row.Type_Of_Claims || 'Reimbursement',
+                claimAmount: parseFloat(row.Total_ClaimAmount || '0') || 0,
+                approvedAmount: Number(row.ApprovedAmount ?? row.Approved_Amount ?? 0),
+                claimStatus: row.Claim_Status || '',
+                doa: row.Date_Of_Admission || null,
+                dod: row.Date_Of_Discharge || null,
+                ailments: row.Ailment || row.Final_Diagnosis || '',
+                remarks: row.Sub_Claim_Type || '',
+                denialRemarks: '',
+                priBenefMaid: Number(row.MA_benefMediAssistid || 0),
+                isPastClaim: true,
+            };
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(`Retrieved past claim detail in ${durationMs}ms`, HRService.name, {
+                tenantId: normalizedTenantId,
+                claimId: trimmedClaimId,
+            });
+
+            return { success: true, detail };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching past claim detail after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, claimId: trimmedClaimId },
+            );
+            return { success: false, error: 'Internal server error fetching past claim detail' };
+        }
+    }
 }
