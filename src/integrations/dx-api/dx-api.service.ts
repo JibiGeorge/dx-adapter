@@ -289,4 +289,43 @@ export class DXApiService {
             throw err;
         }
     }
+
+    async requestEnrollmentOperation(
+        baseUrl: string,
+        apiKey: string,
+        payload: { ids: Array<string | number>; operation: string },
+    ): Promise<any> {
+        if (!baseUrl) {
+            this.logger.error('Enrollment API base URL is not configured', undefined, DXApiService.name);
+            throw new Error('Enrollment API URL is not configured.');
+        }
+
+        const cleanUrl = baseUrl.replace(/\/+$/, '');
+        const endpoint = `${cleanUrl}/api/broker/enrollments/request-operation`;
+
+        this.logger.debug('Calling Enrollment request-operation API', DXApiService.name, {
+            endpoint,
+            payload,
+        });
+
+        try {
+            const response = await this.httpService.put<any>(endpoint, payload, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-API-Key': apiKey,
+                },
+            });
+
+            return response;
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+                `Enrollment request-operation error: ${err.message}`,
+                err.stack,
+                DXApiService.name,
+                { endpoint },
+            );
+            throw err;
+        }
+    }
 }

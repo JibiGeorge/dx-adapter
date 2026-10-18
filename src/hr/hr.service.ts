@@ -5034,4 +5034,59 @@ export class HRService {
             return { error: 'Internal server error fetching enrollment status' };
         }
     }
+
+    async requestEnrollmentOperation(
+        tenantId: string,
+        ids: Array<string | number>,
+        operation: 'Update' | 'Disable',
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        if (!ids || !Array.isArray(ids) || ids.length === 0) {
+            return { error: 'ids array is required' };
+        }
+
+        if (operation !== 'Update' && operation !== 'Disable') {
+            return { error: 'operation must be Update or Disable' };
+        }
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const enrollmentApiUrl = tenantConfig?.config?.dataexchange?.api || '';
+            const enrollmentApiKey = tenantConfig?.config?.dataexchange?.key || '';
+
+            if (!enrollmentApiUrl) {
+                this.logger.error('Enrollment API URL not configured', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { error: 'Enrollment API URL not configured' };
+            }
+
+            const data = await this.dxApiService.requestEnrollmentOperation(
+                enrollmentApiUrl,
+                enrollmentApiKey,
+                { ids, operation },
+            );
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Requested enrollment operation ${operation} for ${ids.length} items in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, count: ids.length, operation },
+            );
+
+            return { success: true, data };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error requesting enrollment operation after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, idsCount: ids?.length, operation },
+            );
+            return { error: 'Internal server error' };
+        }
+    }
 }

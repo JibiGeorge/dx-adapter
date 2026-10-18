@@ -12,6 +12,7 @@ import { DownloadEcardDto, SearchEcardDetailsDto, ViewCoverageLetterDto, ViewEca
 import { HospitalSearchDto } from "./dto/hospital.dto.js";
 import { PowerBIDto } from "./dto/powerbi.dto.js";
 import { EnrollmentStatusQueryDto } from "./dto/enrollment-status.dto.js";
+import { EnrollmentOperationDto } from "./dto/enrollment-operation.dto.js";
 
 @Controller('hr')
 @UseGuards(JwtAuthGuard, HRRoleGuard)
@@ -570,5 +571,21 @@ export class HRController {
         }
 
         return this.hrService.getEnrollmentStatus(tenantId, user, query);
+    }
+
+    @Post('enrollment-operation')
+    async requestEnrollmentOperation(
+        @Headers('x-tenant-id') tenantId: string,
+        @Body() body: EnrollmentOperationDto,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.requestEnrollmentOperation(
+            tenantId,
+            body.ids,
+            body.operation,
+        );
     }
 }
