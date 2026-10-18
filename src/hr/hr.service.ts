@@ -18,6 +18,9 @@ import { ProclaimApiService } from "../integrations/proclaim-api/proclaim-api.se
 import { TENANTS } from "../../utils/tentant-helper.js";
 import { JwtService } from "@nestjs/jwt";
 import { UpdateProfileDto } from "./dto/update-profile.dto.js";
+import * as path from "path";
+import * as fs from "fs";
+import * as crypto from "crypto";
 
 interface PolicyBeneficiariesParams {
     policyNo: string;
@@ -6171,6 +6174,112 @@ export class HRService {
                 { tenantId: normalizedTenantId, userId: user?.userId },
             );
             return { isSuccess: false, message: 'Internal server error while updating profile.' };
+        }
+    }
+
+    async uploadProfilePic(
+        tenantId: string,
+        user: UserSessionPayload,
+        file: UploadedMulterFile,
+    ): Promise<{
+        isSuccess: boolean;
+        message: string;
+        profileImgUrl?: string;
+        token?: string;
+    }> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+
+        try {
+            if (!file || !file.buffer || file.buffer.length === 0) {
+                return { isSuccess: false, message: 'No file uploaded.' };
+            }
+
+            const allowedExtensions = ['.png', '.jpg', '.jpeg'];
+            const originalName = (file.originalname || '').toLowerCase();
+            const ext = path.extname(originalName).toLowerCase() || '.jpg';
+            const isValidExt = allowedExtensions.includes(ext);
+            if (!isValidExt) {
+                return { isSuccess: false, message: 'Allowed Profile pic extensions : png, jpg, jpeg' };
+            }
+
+            const portalName = user?.activePortal || 'hr';
+            const fileGuid = `${portalName}_${crypto.randomUUID()}${ext}`;
+
+            // 1. Save file locally on disk so local and container storage can serve it directly
+            const uploadDir = path.join(process.cwd(), 'uploads', 'profile-pics');
+            if (!fs.existsSync(uploadDir)) {
+                fs.mkdirSync(uploadDir, { recursive: true });
+            }
+            const localFilePath = path.join(uploadDir, fileGuid);
+            fs.writeFileSync(localFilePath, file.buffer);
+
+            // 2. Persist in userProfileStore (MongoDB + memory cache) scoped to this portal
+            const base64Data = Buffer.from(file.buffer).toString('base64');
+            await this.userProfileRepo.saveProfileOverrides(
+                user?.loginName,
+                {
+                    profileImgUrl: fileGuid,
+                    profileImgData: base64Data,
+                },
+                portalName,
+            );
+
+            // 3. Best-effort upload to upstream UAT DMS (non-blocking)
+            try {
+                const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(normalizedTenantId);
+                const dmsHostUrl = process.env.DMS_HOST_URL || 'https://uat-lawton-dms.lawtonasia.com';
+                const mbAppId = process.env.MB_APP_ID || String(tenantConfig?.config?.auth?.appId || '9240');
+                const mbAppUrl = process.env.MB_APP_URL || 'https://uat-maglobal.lawtonasia.com/';
+
+                this.claimService
+                    .uploadDmsFile(
+                        user?.loginName || '',
+                        file.buffer,
+                        file.originalname || 'profilePic.jpg',
+                        file.mimetype || 'image/jpeg',
+                        mbAppId,
+                        mbAppUrl,
+                        dmsHostUrl,
+                    )
+                    .catch((e: any) =>
+                        this.logger.debug(`DMS upload background attempt error: ${e?.message}`, HRService.name),
+                    );
+            } catch (upstreamErr: any) {
+                this.logger.debug(`Upstream DMS upload skipped: ${upstreamErr?.message || upstreamErr}`, HRService.name);
+            }
+
+            // 4. Generate refreshed JWT token with the new profileImgUrl and activePortal
+            const updatedUserSession: UserSessionPayload = {
+                ...user,
+                activePortal: portalName,
+                profileImgUrl: fileGuid,
+            };
+            const newToken = await this.jwtService.signAsync(updatedUserSession);
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Profile picture uploaded successfully in ${durationMs}ms for ${user?.loginName} (${fileGuid})`,
+                HRService.name,
+                { tenantId: normalizedTenantId, loginName: user?.loginName, fileGuid },
+            );
+
+            return {
+                isSuccess: true,
+                message: 'Profile picture updated successfully',
+                profileImgUrl: fileGuid,
+                token: newToken,
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error uploading profile picture after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            return { isSuccess: false, message: 'Internal server error during upload.' };
         }
     }
 }

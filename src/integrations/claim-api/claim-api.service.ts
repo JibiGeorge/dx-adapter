@@ -532,6 +532,59 @@ export class ClaimApiService {
     }
   }
 
+  async uploadDmsFile(
+    userName: string,
+    fileBuffer: Buffer | Uint8Array,
+    fileName: string,
+    mimeType?: string,
+    appIdOverride?: string,
+    appUrlOverride?: string,
+    dmsHostOverride?: string,
+  ): Promise<any> {
+    const dmsHost = dmsHostOverride || process.env.DMS_HOST_URL || 'https://uat-lawton-dms.lawtonasia.com';
+    const appId = appIdOverride || process.env.MB_APP_ID || '9240';
+    const appUrl = appUrlOverride || process.env.MB_APP_URL || 'https://uat-maglobal.lawtonasia.com/';
+
+    const cleanHost = dmsHost.replace(/\/+$/, '');
+    const endpoint = `${cleanHost}/UploadFile?UserName=${encodeURIComponent(userName || '')}&FileType=2&FolderName=&format=json`;
+
+    this.logger.debug(`Calling DMS UploadFile for userName: ${userName}, fileName: ${fileName}`, ClaimApiService.name, {
+      endpoint,
+      userName,
+      fileName,
+      appId,
+    });
+
+    try {
+      const formData = new FormData();
+      const blob = new Blob([new Uint8Array(fileBuffer)], {
+        type: mimeType || 'image/jpeg',
+      });
+      formData.append('file', blob, fileName || 'profilePic.jpg');
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          mbappid: appId,
+          mbappurl: appUrl,
+        },
+        body: formData,
+      });
+
+      const data = await response.json().catch(() => null);
+      return data;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.debug(
+        `DMS upload background attempt error: ${err.message}`,
+        ClaimApiService.name,
+        { endpoint, userName, fileName },
+      );
+      throw err;
+    }
+  }
+
   async getPolicyLivesCount(
     policyId: number,
     startDateMs: number,

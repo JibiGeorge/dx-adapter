@@ -832,4 +832,23 @@ export class HRController {
         const status = result.isSuccess ? 200 : (result.message?.includes('10-digit') ? 400 : 500);
         return res.status(status).json(result);
     }
+
+    @Post('profile/upload-pic')
+    @UseInterceptors(FileInterceptor('profilePic'))
+    async uploadProfilePic(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @UploadedFile() file: UploadedMulterFile,
+        @Res() res: Response,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            return res.status(400).json({ isSuccess: false, message: 'x-tenant-id header is required' });
+        }
+
+        const result = await this.hrService.uploadProfilePic(tenantId, user, file);
+        const status = result.isSuccess
+            ? 200
+            : (result.message?.includes('No file') || result.message?.includes('Allowed Profile') ? 400 : 500);
+        return res.status(status).json(result);
+    }
 }
