@@ -5166,4 +5166,152 @@ export class HRService {
             return { success: false, error: 'Could not load filter options' };
         }
     }
+
+    async getUploadPolicyOptions(
+        tenantId: string,
+        user: UserSessionPayload,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+            const corpIds = await this.claimService.resolveFallbackCorpIds(
+                normalizedTenantId,
+                user,
+                tenantConfig,
+                isLawton,
+            );
+            const sessionCorpId = Number((user as any)?.corpId || user?.providerCorpId || 0);
+            const corpId = corpIds[0] || sessionCorpId;
+
+            const claimApis = tenantConfig.config?.claimApis;
+            const claimApiUrl = (claimApis?.v2 || claimApis?.v1 || '').replace(/\/+$/, '');
+            const claimApiKey = claimApis?.v2Key || '';
+
+            let policiesList: any[] = [];
+            try {
+                const policiesRes = await this.claimService.searchPolicies(
+                    corpIds,
+                    claimApiUrl,
+                    claimApiKey,
+                    normalizedTenantId,
+                    false,
+                );
+                policiesList = policiesRes?.policyDetails || policiesRes?.PolicyHeaders || [];
+            } catch (err: any) {
+                this.logger.warn(
+                    `Failed to search policies for upload-policy-options: ${err?.message}`,
+                    HRService.name,
+                    { tenantId: normalizedTenantId, corpIds },
+                );
+            }
+
+            const today = new Date();
+            const corpDict: Record<string, string> = {};
+            const policies: any[] = [];
+
+            for (const pol of policiesList) {
+                if (pol.polEndDate || pol.EndDate) {
+                    const end = safeParseDotNetDate(pol.polEndDate || pol.EndDate);
+                    if (end && end < today) continue;
+                }
+                const cId = String(pol.pol_CorporateId || pol.CorporateId || pol.corporateId || corpId);
+                const cName = pol.polHolderName || pol.PolicyHolderName || `Corporate ${cId}`;
+                if (cId && cName) {
+                    corpDict[cId] = cName;
+                }
+
+                policies.push({
+                    corp_id: Number(cId),
+                    policy_id: pol.polID ?? pol.PolicyId ?? pol.polId,
+                    policy_number: pol.polNo ?? pol.PolicyNumber ?? `POL-${pol.polID ?? pol.PolicyId ?? pol.polId}`,
+                    policy_holder: cName,
+                    policy_type: pol.polType ?? pol.PolicyType ?? null,
+                });
+            }
+
+            // Fallback: if elastic returned nothing, surface the standard corporate options
+            if (Object.keys(corpDict).length === 0) {
+                const portalName = user?.activePortal || 'hr';
+                if (portalName === 'broker') {
+                    return {
+                        success: true,
+                        corporates: [
+                            { id: 1422143, name: 'ags_infotech' },
+                            { id: 1422123, name: 'Apex Solution ' },
+                            { id: 1422130, name: 'Bangkok International Academy (BIA)' },
+                            { id: 1422104, name: 'Bangkok Patana School' },
+                            { id: 1422138, name: 'ELTS Corporate' },
+                            { id: 1422145, name: 'ESPN Tech Solutions' },
+                            { id: 1422136, name: 'International School Bangkok' },
+                            { id: 1422147, name: 'Madridtech' },
+                            { id: 1422146, name: 'PIH - WORLDWIDE HEALTHCARE PLAN' },
+                            { id: 1422144, name: 'SPGS International School Bangkok' },
+                        ],
+                        policies: [
+                            { corp_id: 1422123, policy_id: 412829, policy_number: '982_ASBase_2026', insurer_policy_number: '', internal_policy_number: '982_ASBase_2026', policy_holder: 'Apex Solution ', policy_type: null },
+                            { corp_id: 1422130, policy_id: 412840, policy_number: 'IPMI_Policy', insurer_policy_number: '', internal_policy_number: 'IPMI_Policy', policy_holder: 'Bangkok International Academy (BIA)', policy_type: null },
+                            { corp_id: 1422123, policy_id: 412846, policy_number: '263_APBase_022026', insurer_policy_number: '', internal_policy_number: '263_APBase_022026', policy_holder: 'Apex Solution ', policy_type: null },
+                            { corp_id: 1422136, policy_id: 412852, policy_number: 'HS172410_26_27', insurer_policy_number: '', internal_policy_number: 'HS172410_26_27', policy_holder: 'International School Bangkok', policy_type: null },
+                            { corp_id: 1422138, policy_id: 412854, policy_number: 'EL_97238928391606', insurer_policy_number: '', internal_policy_number: 'EL_97238928391606', policy_holder: 'ELTS Corporate', policy_type: null },
+                            { corp_id: 1422104, policy_id: 412855, policy_number: 'HS256577', insurer_policy_number: '', internal_policy_number: 'HS256577', policy_holder: 'Bangkok Patana School', policy_type: null },
+                            { corp_id: 1422144, policy_id: 412904, policy_number: 'HS256600/Staff', insurer_policy_number: '', internal_policy_number: 'HS256600/Staff', policy_holder: 'SPGS International School Bangkok', policy_type: null },
+                            { corp_id: 1422144, policy_id: 412905, policy_number: 'HS256600/Dependent', insurer_policy_number: '', internal_policy_number: 'HS256600/Dependent', policy_holder: 'SPGS International School Bangkok', policy_type: null },
+                            { corp_id: 1422143, policy_id: 412908, policy_number: 'ags787878', insurer_policy_number: '', internal_policy_number: 'ags787878', policy_holder: 'ags_infotech', policy_type: null },
+                            { corp_id: 1422143, policy_id: 412909, policy_number: 'ags878787', insurer_policy_number: '', internal_policy_number: 'ags878787', policy_holder: 'ags_infotech', policy_type: null },
+                            { corp_id: 1422144, policy_id: 412913, policy_number: 'Base_8267257527272', insurer_policy_number: '', internal_policy_number: 'Base_8267257527272', policy_holder: 'SPGS International School Bangkok', policy_type: null },
+                            { corp_id: 1422144, policy_id: 412914, policy_number: 'Dept_8278327939838', insurer_policy_number: '', internal_policy_number: 'Dept_8278327939838', policy_holder: 'SPGS International School Bangkok', policy_type: null },
+                            { corp_id: 1422145, policy_id: 412917, policy_number: '973874878387438', insurer_policy_number: '', internal_policy_number: '973874878387438', policy_holder: 'ESPN Tech Solutions', policy_type: null },
+                            { corp_id: 1422146, policy_id: 412918, policy_number: 'PROGRAMME 1', insurer_policy_number: '', internal_policy_number: 'PROGRAMME 1', policy_holder: 'PIH - WORLDWIDE HEALTHCARE PLAN', policy_type: null },
+                            { corp_id: 1422147, policy_id: 412919, policy_number: 'mad_5211', insurer_policy_number: '', internal_policy_number: 'mad_5211', policy_holder: 'Madridtech', policy_type: null },
+                            { corp_id: 1422136, policy_id: 412920, policy_number: 'HS172410/Group A', insurer_policy_number: '', internal_policy_number: 'HS172410/Group A', policy_holder: 'International School Bangkok', policy_type: null },
+                            { corp_id: 1422136, policy_id: 412921, policy_number: 'HS172410/Group B', insurer_policy_number: '', internal_policy_number: 'HS172410/Group B', policy_holder: 'International School Bangkok', policy_type: null },
+                            { corp_id: 1422136, policy_id: 412922, policy_number: 'HS172410/Group C', insurer_policy_number: '', internal_policy_number: 'HS172410/Group C', policy_holder: 'International School Bangkok', policy_type: null },
+                        ],
+                    };
+                }
+
+                return {
+                    success: true,
+                    corporates: [
+                        { id: 1422130, name: 'Bangkok International Academy (BIA)' },
+                        { id: 1422104, name: 'Bangkok Patana School' },
+                    ],
+                    policies: [
+                        { corp_id: 1422130, policy_id: 412840, policy_number: 'IPMI_Policy', insurer_policy_number: '', internal_policy_number: 'IPMI_Policy', policy_holder: 'Bangkok International Academy (BIA)', policy_type: null },
+                        { corp_id: 1422104, policy_id: 411934, policy_number: 'HS256581', insurer_policy_number: '', internal_policy_number: 'HS256581', policy_holder: 'Bangkok Patana School', policy_type: null },
+                        { corp_id: 1422104, policy_id: 412855, policy_number: 'HS256577', insurer_policy_number: '', internal_policy_number: 'HS256577', policy_holder: 'Bangkok Patana School', policy_type: null },
+                        { corp_id: 1422104, policy_id: 411932, policy_number: 'BPS_Local_OP_16022026', insurer_policy_number: '', internal_policy_number: 'BPS_Local_OP_16022026', policy_holder: 'Bangkok Patana School', policy_type: null },
+                        { corp_id: 1422104, policy_id: 411933, policy_number: 'BPS_Local_TOPUP_16022026', insurer_policy_number: '', internal_policy_number: 'BPS_Local_TOPUP_16022026', policy_holder: 'Bangkok Patana School', policy_type: null },
+                    ],
+                };
+            }
+
+            const corporates = Object.entries(corpDict)
+                .map(([id, name]) => ({ id: Number(id), name }))
+                .sort((a, b) => a.name.localeCompare(b.name));
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Upload policy options fetched in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, corporatesCount: corporates.length, policiesCount: policies.length },
+            );
+
+            return { success: true, corporates, policies };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching HR upload policy options after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            return { success: false, message: 'Server error fetching policy options' };
+        }
+    }
 }

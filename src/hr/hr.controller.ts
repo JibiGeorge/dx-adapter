@@ -600,4 +600,16 @@ export class HRController {
 
         return this.hrService.getEnrollmentFilterOptions(tenantId, user);
     }
+
+    @Get('upload-policy-options')
+    async getUploadPolicyOptions(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getUploadPolicyOptions(tenantId, user);
+    }
 }
