@@ -776,4 +776,30 @@ export class HRController {
 
         return res.status(result.status || 200).json(result);
     }
+
+    @All(['enrollment-download', 'DownloadBrokerEnrollments'])
+    async downloadBrokerEnrollments(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Query() query: any,
+        @Body() body: any,
+        @Res() res: Response,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const result = await this.hrService.downloadBrokerEnrollments(tenantId, user, query, body);
+
+        if (!result.success) {
+            return res.status(result.status || 500).json({ error: result.error });
+        }
+
+        res.set({
+            'Content-Type': result.contentType,
+            'Content-Disposition': result.contentDisposition,
+        });
+
+        return res.status(200).send(result.buffer);
+    }
 }

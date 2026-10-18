@@ -5832,4 +5832,127 @@ export class HRService {
             };
         }
     }
+
+    async downloadBrokerEnrollments(
+        tenantId: string,
+        user: UserSessionPayload,
+        query: any,
+        body: any,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+            const corpIds = await this.claimService.resolveFallbackCorpIds(
+                normalizedTenantId,
+                user,
+                tenantConfig,
+                isLawton,
+            );
+
+            const enrollmentApiUrl = tenantConfig?.config?.dataexchange?.api || '';
+            const enrollmentApiKey = tenantConfig?.config?.dataexchange?.key || '';
+
+            if (!enrollmentApiUrl) {
+                this.logger.error('Enrollment API URL not configured', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { error: 'Enrollment API URL not configured', status: 500 };
+            }
+
+            const corpIdOverride = Number(query?.corpId || body?.corpId) || 0;
+            const operation = query?.operation || body?.operation;
+            const productType =
+                query?.productType ||
+                query?.product_type ||
+                body?.productType ||
+                body?.product_type;
+            const policyNo =
+                query?.policyNo ||
+                query?.policy_no ||
+                body?.policyNo ||
+                body?.policy_no;
+            const refFile =
+                query?.refFile ||
+                query?.ref_file ||
+                body?.refFile ||
+                body?.ref_file;
+            const approval = query?.approval || body?.approval;
+            const selectedIds =
+                query?.selectedIds ||
+                query?.selected_ids ||
+                body?.selectedIds ||
+                body?.selected_ids;
+
+            const params = new URLSearchParams();
+            if (corpIdOverride > 0) {
+                params.set('corp_id', String(corpIdOverride));
+            } else {
+                const sessionCorpId = Number((user as any)?.corpId || user?.providerCorpId || 0);
+                const corpId = corpIds[0] || sessionCorpId;
+                if (corpId) {
+                    params.set('corp_id', String(corpId));
+                }
+            }
+
+            const role = (user as any)?.activePortal === 'broker' ? 'broker' : 'hr';
+            if (role === 'broker' && (user as any)?.brokerId) {
+                params.set('broker_id', String((user as any).brokerId));
+            }
+
+            params.set('role', role);
+            if (operation && operation !== 'All') params.set('operation', String(operation));
+            if (productType) params.set('product_type', String(productType));
+            if (policyNo) params.set('policy_no', String(policyNo));
+            if (refFile) params.set('ref_file', String(refFile));
+            if (approval) params.set('approval', String(approval));
+            if (selectedIds) {
+                params.set(
+                    'selected_ids',
+                    Array.isArray(selectedIds) ? selectedIds.join(',') : String(selectedIds),
+                );
+            }
+
+            const parsedIds = selectedIds
+                ? Array.isArray(selectedIds)
+                    ? selectedIds
+                    : String(selectedIds)
+                          .split(',')
+                          .map((s: string) => s.trim())
+                          .filter(Boolean)
+                : undefined;
+
+            const fileData = await this.dxApiService.downloadBrokerEnrollments(
+                enrollmentApiUrl,
+                enrollmentApiKey,
+                params,
+                {
+                    selected_ids: parsedIds,
+                    selectedIds: parsedIds,
+                },
+            );
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Broker enrollments download generated in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, role },
+            );
+
+            return { success: true, ...fileData };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error downloading enrollment Excel after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId },
+            );
+            return { error: 'Internal server error downloading enrollment data', status: 500 };
+        }
+    }
 }

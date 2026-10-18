@@ -672,4 +672,62 @@ export class DXApiService {
             throw err;
         }
     }
+
+    async downloadBrokerEnrollments(
+        baseUrl: string,
+        apiKey: string,
+        params: URLSearchParams,
+        body: { selected_ids?: any[]; selectedIds?: any[] },
+    ): Promise<{ buffer: Buffer; contentType: string; contentDisposition: string }> {
+        if (!baseUrl) {
+            this.logger.error('Enrollment API base URL is not configured', undefined, DXApiService.name);
+            throw new Error('Enrollment API URL is not configured.');
+        }
+
+        const cleanUrl = baseUrl.replace(/\/+$/, '');
+        const qs = params.toString() ? `?${params.toString()}` : '';
+        const endpoint = `${cleanUrl}/api/broker/enrollments/download${qs}`;
+
+        this.logger.debug('Downloading broker enrollments spreadsheet', DXApiService.name, {
+            endpoint,
+        });
+
+        try {
+            const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'X-API-Key': apiKey,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(body),
+            });
+
+            if (!res.ok) {
+                const errText = await res.text();
+                this.logger.error(`Enrollment download error: HTTP ${res.status} - ${errText}`, DXApiService.name);
+                throw new Error(`Could not generate download: ${errText}`);
+            }
+
+            const contentType =
+                res.headers.get('content-type') ||
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+            const contentDisposition =
+                res.headers.get('content-disposition') ||
+                `attachment; filename="enrollments.xlsx"`;
+
+            const arrayBuffer = await res.arrayBuffer();
+            const buffer = Buffer.from(arrayBuffer);
+
+            return { buffer, contentType, contentDisposition };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+                `Error downloading broker enrollments: ${err.message}`,
+                err.stack,
+                DXApiService.name,
+                { endpoint },
+            );
+            throw err;
+        }
+    }
 }
