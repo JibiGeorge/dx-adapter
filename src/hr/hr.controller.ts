@@ -411,4 +411,27 @@ export class HRController {
 
         return this.hrService.getPolicyDocuments(tenantId, polIdNum);
     }
+
+    @Get('download-file')
+    async downloadFile(
+        @Query('fileGuid') fileGuidQuery: string,
+        @Query('filepath') filepathQuery: string,
+        @Res() res: Response,
+    ): Promise<any> {
+        const fileGuid = fileGuidQuery || filepathQuery || '';
+        if (!fileGuid?.trim()) {
+            return res.status(400).json({ error: 'fileGuid is required' });
+        }
+
+        const result = await this.hrService.downloadDmsFile(fileGuid);
+
+        if ('fileBuffer' in result) {
+            res.setHeader('Content-Type', result.contentType);
+            res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(result.fileName)}"`);
+            res.setHeader('Content-Length', result.fileBuffer.length);
+            return res.send(result.fileBuffer);
+        }
+
+        return res.status(result.statusCode || 500).json({ error: result.error });
+    }
 }

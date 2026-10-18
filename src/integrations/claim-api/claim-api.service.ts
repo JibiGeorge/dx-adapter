@@ -491,4 +491,44 @@ export class ClaimApiService {
 
     return response;
   }
+
+  async downloadDmsFile(fileGuid: string): Promise<{ fileName: string; fileBytes: string }> {
+    const dmsHost = process.env.DMS_HOST_URL || 'http://coredms.medibuddy.in/';
+    const appId = process.env.MB_APP_ID || '9192';
+    const appUrl = process.env.MB_APP_URL || 'https://portal.medibuddy.in/';
+
+    const cleanHost = dmsHost.replace(/\/+$/, '');
+    const endpoint = `${cleanHost}/DownloadFile`;
+
+    this.logger.debug(`Calling DMS DownloadFile for fileGuid: ${fileGuid}`, ClaimApiService.name, {
+      endpoint,
+      fileGuid,
+      appId,
+    });
+
+    try {
+      const response = await this.httpService.post<{ fileName: string; fileBytes: string }>(
+        endpoint,
+        { FileIdentifier: fileGuid },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            mbappid: appId,
+            mbappurl: appUrl,
+          },
+        },
+      );
+
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `downloadDmsFile error: ${err.message}`,
+        err.stack,
+        ClaimApiService.name,
+        { endpoint, fileGuid },
+      );
+      throw err;
+    }
+  }
 }

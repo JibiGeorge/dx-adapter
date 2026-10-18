@@ -4133,4 +4133,81 @@ export class HRService {
             return { success: false, error: 'Internal server error fetching policy documents' };
         }
     }
+
+    getContentType(fileName: string): string {
+        const ext = (fileName.split('.').pop() || '').toLowerCase();
+        switch (ext) {
+            case 'pdf':
+                return 'application/pdf';
+            case 'png':
+                return 'image/png';
+            case 'jpg':
+            case 'jpeg':
+                return 'image/jpeg';
+            case 'gif':
+                return 'image/gif';
+            case 'svg':
+                return 'image/svg+xml';
+            case 'txt':
+                return 'text/plain';
+            case 'csv':
+                return 'text/csv';
+            case 'doc':
+                return 'application/msword';
+            case 'docx':
+                return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+            case 'xls':
+                return 'application/vnd.ms-excel';
+            case 'xlsx':
+                return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+            case 'zip':
+                return 'application/zip';
+            default:
+                return 'application/octet-stream';
+        }
+    }
+
+    async downloadDmsFile(
+        fileGuid: string,
+    ): Promise<
+        | { fileBuffer: Buffer; fileName: string; contentType: string }
+        | { error: string; statusCode: number }
+    > {
+        const cleanGuid = String(fileGuid || '').trim();
+        if (!cleanGuid) {
+            return { error: 'fileGuid is required', statusCode: 400 };
+        }
+
+        this.logger.debug(`Downloading DMS file for fileGuid: ${cleanGuid}`, HRService.name, {
+            fileGuid: cleanGuid,
+        });
+
+        try {
+            const dmsData: any = await this.claimService.downloadDmsFile(cleanGuid);
+            if (!dmsData || (!dmsData.fileBytes && !dmsData.FileBytes)) {
+                return { error: 'File content not found', statusCode: 404 };
+            }
+
+            const fileName =
+                dmsData.fileName || dmsData.FileName || 'downloaded_document';
+            const base64Bytes = dmsData.fileBytes || dmsData.FileBytes;
+            const fileBuffer = Buffer.from(base64Bytes, 'base64');
+            const contentType = this.getContentType(fileName);
+
+            return {
+                fileBuffer,
+                fileName,
+                contentType,
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+                `Error downloading file from DMS: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { fileGuid: cleanGuid },
+            );
+            return { error: 'Internal server error downloading file', statusCode: 500 };
+        }
+    }
 }
