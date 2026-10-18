@@ -1,4 +1,5 @@
-import { BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, Res, UseGuards } from "@nestjs/common";
+import type { Response } from "express";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard.js";
 import { HRRoleGuard } from "../../common/guards/hr-role.guard.js";
 import { HRService } from "./hr.service.js";
@@ -7,7 +8,7 @@ import type { UserSessionPayload } from "../auth/auth.types.js";
 import { HRDashboardResponse, HRStatusResponse } from "./hr.types.js";
 import { GetCorpDto } from "./dto/corp.dto.js";
 import { UpdateBeneficiaryDetailsDto } from "./dto/beneficiary.dto.js";
-import { SearchEcardDetailsDto, ViewEcardDto } from "./dto/ecard.dto.js";
+import { DownloadEcardDto, SearchEcardDetailsDto, ViewEcardDto } from "./dto/ecard.dto.js";
 
 @Controller('hr')
 @UseGuards(JwtAuthGuard, HRRoleGuard)
@@ -321,5 +322,33 @@ export class HRController {
         }
 
         return this.hrService.viewEcard(tenantId, user, body);
+    }
+
+    @Post('ecard-download')
+    async downloadEcard(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Body() body: DownloadEcardDto,
+        @Res() res: Response,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const result = await this.hrService.downloadEcard(tenantId, user, body);
+
+        if ('pdfBuffer' in result) {
+            res.set({
+                'Content-Type': 'application/pdf',
+                'Content-Disposition': `attachment; filename="${result.fileName}.pdf"`,
+            });
+            return res.send(result.pdfBuffer);
+        }
+
+        return res.status(result.statusCode || 400).json({
+            isSuccess: false,
+            error: result.message,
+            message: result.message,
+        });
     }
 }

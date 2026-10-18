@@ -57,3 +57,36 @@ export class ViewEcardDto {
     printPattern?: string;
 }
 
+export class DownloadEcardDto {
+    @IsOptional()
+    @IsNumber()
+    @Type(() => Number)
+    corpId?: number;
+
+    @IsOptional()
+    @IsNumber()
+    @Type(() => Number)
+    polId?: number;
+
+    @IsOptional()
+    @IsNumber()
+    @Type(() => Number)
+    policyId?: number;
+
+    @IsOptional()
+    @IsNumber()
+    @Type(() => Number)
+    memberPolicyId?: number;
+
+    @IsOptional()
+    @IsNumber()
+    @Type(() => Number)
+    maid?: number;
+
+    @IsOptional()
+    @IsNumber()
+    @Type(() => Number)
+    insurerId?: number;
+}
+
+

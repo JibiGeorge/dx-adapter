@@ -3529,4 +3529,122 @@ export class HRService {
             return { isSuccess: false, message: 'Internal server error fetching ecard' };
         }
     }
+
+    async downloadEcard(
+        tenantId: string,
+        user: UserSessionPayload,
+        body: any,
+    ): Promise<{ pdfBuffer: Buffer; fileName: string } | { isSuccess: false; message: string; statusCode: number }> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+
+        const corpIdBody = Number(body?.corpId || 0);
+        const sessionCorpId = Number((user as any)?.corpId || user?.providerCorpId || 0);
+        let corpId = corpIdBody > 0 ? corpIdBody : sessionCorpId;
+
+        const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+        const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+        if (!corpId || corpId <= 0) {
+            const corpIds = await this.claimService.resolveFallbackCorpIds(
+                normalizedTenantId,
+                user,
+                tenantConfig,
+                isLawton,
+            );
+            corpId = corpIds[0] || sessionCorpId;
+        }
+
+        const effectivePolId = Number(
+            body?.polId || body?.policyId || body?.memberPolicyId || 0,
+        );
+        const maid = Number(body?.maid || 0);
+        const insurerId = Number(body?.insurerId || 0);
+
+        if (!maid || !effectivePolId) {
+            return { isSuccess: false, message: 'maid and polId are required', statusCode: 400 };
+        }
+
+        this.logger.debug('Processing downloadEcard', HRService.name, {
+            tenantId: normalizedTenantId,
+            corpId,
+            maid,
+            effectivePolId,
+            insurerId,
+        });
+
+        try {
+            if (!tenantConfig) {
+                return { isSuccess: false, message: 'Tenant not found', statusCode: 404 };
+            }
+
+            const v2Url = tenantConfig.config?.claimApis?.v2;
+            const v2Key = tenantConfig.config?.claimApis?.v2Key;
+            const ecardUrl = tenantConfig.config?.services?.ecard || v2Url;
+
+            const request = {
+                printRequest: {
+                    executionMode: 'Single',
+                    identifierType: 'MemberId',
+                    printPattern: 'Family',
+                    identifierValue: String(maid),
+                },
+                printPattern: 'Family',
+                policyId: effectivePolId,
+                insurerId,
+                corporateId: corpId,
+                policySubId: 0, // matches GetPdfResponse used by DownloadEcardAndResponse
+                outputType: 'PDFByteStream',
+                dbType: 'MA',
+                isPasswordEnabled: false,
+                printExpiredPolicy: false,
+            };
+
+            const pdfresp: any = await this.ecardApiService.getEcardPdf(
+                request,
+                ecardUrl,
+                v2Key,
+                normalizedTenantId,
+            );
+
+            let pdfBuffer: Buffer | null = null;
+            let fileName = `${maid}_${effectivePolId}`;
+
+            if (pdfresp?.rawPdfBuffer && Buffer.isBuffer(pdfresp.rawPdfBuffer)) {
+                pdfBuffer = pdfresp.rawPdfBuffer;
+            } else if (pdfresp?.data?.[0]?.printResponse?.fileBytes) {
+                const fb = pdfresp.data[0].printResponse.fileBytes;
+                pdfBuffer = typeof fb === 'string' ? Buffer.from(fb, 'base64') : Buffer.from(fb);
+                fileName = pdfresp.data[0].printResponse.fileName || fileName;
+            }
+
+            if (!pdfBuffer || pdfBuffer.length === 0) {
+                this.logger.warn('Ecard not available for download', HRService.name, {
+                    maid,
+                    polId: effectivePolId,
+                });
+                return { isSuccess: false, message: 'Ecard not available', statusCode: 404 };
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(`Downloaded ecard PDF successfully in ${durationMs}ms`, HRService.name, {
+                maid,
+                polId: effectivePolId,
+                fileName,
+                bufferSize: pdfBuffer.length,
+            });
+
+            return { pdfBuffer, fileName };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error downloading ecard after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, maid, effectivePolId },
+            );
+            return { isSuccess: false, message: 'Internal server error downloading ecard', statusCode: 500 };
+        }
+    }
 }
