@@ -8,7 +8,7 @@ import type { UserSessionPayload } from "../auth/auth.types.js";
 import { HRDashboardResponse, HRStatusResponse } from "./hr.types.js";
 import { GetCorpDto } from "./dto/corp.dto.js";
 import { UpdateBeneficiaryDetailsDto } from "./dto/beneficiary.dto.js";
-import { DownloadEcardDto, SearchEcardDetailsDto, ViewEcardDto } from "./dto/ecard.dto.js";
+import { DownloadEcardDto, SearchEcardDetailsDto, ViewCoverageLetterDto, ViewEcardDto } from "./dto/ecard.dto.js";
 
 @Controller('hr')
 @UseGuards(JwtAuthGuard, HRRoleGuard)
@@ -350,5 +350,19 @@ export class HRController {
             error: result.message,
             message: result.message,
         });
+    }
+
+    @Post('coverage-letter-view')
+    async viewCoverageLetter(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Headers('host') host: string,
+        @Body() body: ViewCoverageLetterDto,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.viewCoverageLetter(tenantId, user, host || '', body);
     }
 }
