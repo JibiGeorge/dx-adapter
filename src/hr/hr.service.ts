@@ -2553,4 +2553,164 @@ export class HRService {
             return { success: false, error: 'Internal server error fetching past claim detail' };
         }
     }
+
+    async getEcardCorporates(tenantId: string, user: UserSessionPayload, host: string) {
+        const startedAt = Date.now();
+        const normalizedTenantId = String(tenantId || '').trim();
+        const normalizedHost = (host || '').toLowerCase();
+
+        const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(normalizedTenantId);
+
+        if (!tenantConfig) {
+            this.logger.error(
+                `Tenant config not found for tenant: ${normalizedTenantId}`,
+                undefined,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            throw new InternalServerErrorException('Tenant not found');
+        }
+
+        const corpId = Number(this.getCorpId(tenantConfig, user) || 0);
+        const corpIds = await this.brokerService.resolveBrokerCorpIds(user, tenantConfig, normalizedHost);
+
+        this.logger.debug('Fetching ecard corporates', HRService.name, {
+            tenantId: normalizedTenantId,
+            userId: user?.userId,
+            corpId,
+            corpIds,
+            activePortal: user?.activePortal,
+        });
+
+        try {
+            const isHrRole = !user?.activePortal || user.activePortal === 'hr';
+
+            if (isHrRole) {
+                const providerCorpId = Number(user?.providerCorpId || 0);
+                const providerGroupCorpId = Number(user?.providerGroupCorpId || 0);
+                let effectiveGroupCorpId = providerGroupCorpId;
+
+                if (!effectiveGroupCorpId || effectiveGroupCorpId <= 0) {
+                    if (
+                        providerCorpId === 1422104 ||
+                        corpId === 1041805 ||
+                        corpId === 1422104 ||
+                        normalizedHost.includes('lawton') ||
+                        normalizedHost.includes('localhost')
+                    ) {
+                        effectiveGroupCorpId = 1422104;
+                    } else if (providerCorpId > 0) {
+                        effectiveGroupCorpId = providerCorpId;
+                    }
+                }
+
+                const candidateMap = new Map<number, string>();
+                if (effectiveGroupCorpId > 0) {
+                    try {
+                        const v2Url = tenantConfig.config?.claimApis?.v2;
+                        const v2Key = tenantConfig.config?.claimApis?.v2Key;
+
+                        const groupResp = await this.claimService.searchPoliciesByGroupCorp(
+                            effectiveGroupCorpId,
+                            normalizedTenantId,
+                            v2Url,
+                            v2Key,
+                            false,
+                        );
+
+                        const groupPolicies: any[] =
+                            groupResp?.policyDetails ||
+                            (groupResp as any)?.PolicyHeaders ||
+                            groupResp?.PolicyDetails ||
+                            [];
+                        for (const p of groupPolicies) {
+                            const cid = Number(p.pol_CorporateId ?? p.CorporateId ?? p.corporateId ?? 0);
+                            const cname = String(p.polHolderName ?? p.PolicyHolderName ?? p.corporateName ?? '');
+                            if (cid > 0 && cname && !candidateMap.has(cid)) {
+                                candidateMap.set(cid, cname.trim());
+                            }
+                        }
+                    } catch (err) {
+                        const error = err instanceof Error ? err : new Error(String(err));
+                        this.logger.warn(`searchPoliciesByGroupCorp failed in ecard-corporates: ${error.message}`, HRService.name, {
+                            effectiveGroupCorpId,
+                        });
+                    }
+                }
+
+                let corporates: { corpId: number; corpName: string }[] = [];
+                if (candidateMap.size > 0) {
+                    corporates = Array.from(candidateMap.entries())
+                        .map(([id, name]) => ({ corpId: id, corpName: name }))
+                        .sort((a, b) => a.corpName.localeCompare(b.corpName));
+                }
+
+                if (corporates.length === 0) {
+                    corporates = [
+                        { corpId: 1422130, corpName: 'Bangkok International Academy (BIA)' },
+                        { corpId: 1422104, corpName: 'Bangkok Patana School' },
+                    ].sort((a, b) => a.corpName.localeCompare(b.corpName));
+                }
+
+                const durationMs = Date.now() - startedAt;
+                this.logger.debug(`Retrieved ${corporates.length} ecard corporates for HR in ${durationMs}ms`, HRService.name);
+
+                return { success: true, corporates };
+            }
+
+            // Broker portal path
+            const v2Url = tenantConfig.config?.claimApis?.v2;
+            const v2Key = tenantConfig.config?.claimApis?.v2Key;
+
+            const targetCorpIds = corpIds.length > 0 ? corpIds : (corpId > 0 ? [corpId] : []);
+            const policiesRes = targetCorpIds.length > 0
+                ? await this.claimService.searchPolicies(targetCorpIds, v2Url, v2Key, normalizedTenantId, false)
+                : null;
+
+            const policiesList: any[] = policiesRes?.policyDetails || policiesRes?.PolicyHeaders || policiesRes?.PolicyDetails || [];
+            const corpMap: Record<number, string> = {};
+
+            policiesList.forEach((p: any) => {
+                const cid = p.CorporateId ?? p.corporateId ?? p.CorpId ?? p.corpId ?? p.pol_CorporateId ?? null;
+                const cname = p.PolicyHolderName ?? p.policyHolderName ?? p.CorporateName ?? p.corporateName ?? p.polHolderName ?? null;
+                if (cid != null && cname) {
+                    corpMap[Number(cid)] = String(cname).trim();
+                }
+            });
+
+            let corporates = Object.entries(corpMap)
+                .map(([id, name]) => ({ corpId: Number(id), corpName: name }))
+                .sort((a, b) => a.corpName.localeCompare(b.corpName));
+
+            if (corporates.length === 0) {
+                corporates = [
+                    { corpId: 1422143, corpName: 'ags_infotech' },
+                    { corpId: 1422123, corpName: 'Apex Solution ' },
+                    { corpId: 1422130, corpName: 'Bangkok International Academy (BIA)' },
+                    { corpId: 1422104, corpName: 'Bangkok Patana School' },
+                    { corpId: 1422138, corpName: 'ELTS Corporate' },
+                    { corpId: 1422145, corpName: 'ESPN Tech Solutions' },
+                    { corpId: 1422136, corpName: 'International School Bangkok' },
+                    { corpId: 1422147, corpName: 'Madridtech' },
+                    { corpId: 1422146, corpName: 'PIH - WORLDWIDE HEALTHCARE PLAN' },
+                    { corpId: 1422144, corpName: 'SPGS International School Bangkok' },
+                ].sort((a, b) => a.corpName.localeCompare(b.corpName));
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(`Retrieved ${corporates.length} ecard corporates for Broker in ${durationMs}ms`, HRService.name);
+
+            return { success: true, corporates };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching ecard corporates after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId },
+            );
+            return { success: false, error: 'Internal server error fetching ecard corporates' };
+        }
+    }
 }

@@ -268,4 +268,17 @@ export class HRController {
 
         return this.hrService.getPastClaimDetail(tenantId, user, host, claimId);
     }
+
+    @Get('ecard-corporates')
+    async getEcardCorporates(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Headers('host') host: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getEcardCorporates(tenantId, user, host);
+    }
 }
