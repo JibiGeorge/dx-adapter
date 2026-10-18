@@ -19,6 +19,7 @@ import { TenantIdGuard } from '../common/guards/tenant-id.guard';
 import { BrokerModule } from './broker/broker.module';
 import { HRModule } from './hr/hr.module';
 import { MemberModule } from './member/member.module';
+import { ThemeModule } from './theme/theme.module';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -41,6 +42,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     BrokerModule,
     HRModule,
     MemberModule,
+    ThemeModule,
   ],
   controllers: [AppController],
   providers: [

@@ -36,6 +36,29 @@ export class TenantRepository {
   }
 
   /**
+   * Find a tenant by a hostname in its domains array.
+   */
+  async findByHost(host: string): Promise<TenantConfigTypes | null> {
+    if (!host) return null;
+    const cleanHost = host.trim().toLowerCase().split(':')[0]; // strip port if present
+
+    const doc = await this.collection.findOne<Record<string, any>>(
+      {
+        $or: [
+          { 'domains.host': cleanHost },
+          { 'domains.host': host.trim().toLowerCase() },
+          { 'config.app.url': { $regex: cleanHost, $options: 'i' } },
+        ],
+      },
+      { projection: { _id: 0 } },
+    );
+
+    if (!doc) return null;
+
+    return this.toConfigTypes(doc);
+  }
+
+  /**
    * Map a raw MongoDB document to the canonical TenantConfigTypes shape.
    */
   private toConfigTypes(
