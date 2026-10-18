@@ -452,4 +452,22 @@ export class HRController {
 
         return this.hrService.getPolicyLivesCount(tenantId, polIdNum, startDateMs || 0);
     }
+
+    @Get('employee-policies')
+    async getEmployeePolicies(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Query('empCode') empCode: string,
+        @Query('corpIdOverride') corpIdOverride?: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        if (!empCode?.trim()) {
+            return { error: 'empCode is required' };
+        }
+
+        return this.hrService.getEmployeePolicies(tenantId, user, empCode, corpIdOverride);
+    }
 }

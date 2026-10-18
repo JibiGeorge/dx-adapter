@@ -4283,4 +4283,98 @@ export class HRService {
             return { success: false, count: 0 };
         }
     }
+
+    async getEmployeePolicies(
+        tenantId: string,
+        user: UserSessionPayload,
+        empCode: string,
+        corpIdOverride?: number | string,
+    ): Promise<any> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+
+        if (!empCode?.trim()) {
+            return { error: 'empCode is required' };
+        }
+
+        const overrideNum = Number(corpIdOverride || 0);
+
+        this.logger.debug(
+            `Fetching employee policies for empCode: ${empCode}, corpIdOverride: ${overrideNum}`,
+            HRService.name,
+            { tenantId: normalizedTenantId, empCode, corpIdOverride: overrideNum },
+        );
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            if (!tenantConfig) {
+                return { success: false, message: 'Tenant not found' };
+            }
+
+            const sessionCorpId = Number((user as any)?.corpId || user?.providerCorpId || 0);
+            const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+            let scope: number[] = [];
+            if (overrideNum > 0) {
+                scope = [overrideNum];
+            } else {
+                const corpIds = await this.claimService.resolveFallbackCorpIds(
+                    normalizedTenantId,
+                    user,
+                    tenantConfig,
+                    isLawton,
+                );
+                scope = corpIds.length > 0 ? corpIds : sessionCorpId > 0 ? [sessionCorpId] : [];
+            }
+
+            const v2Url = tenantConfig.config?.claimApis?.v2;
+            const v2Key = tenantConfig.config?.claimApis?.v2Key;
+
+            const policiesRes: any =
+                scope.length > 0
+                    ? await this.claimService.searchPolicies(
+                          scope,
+                          v2Url,
+                          v2Key,
+                          normalizedTenantId,
+                          false,
+                      )
+                    : null;
+
+            const policies: any[] = (
+                policiesRes?.policyDetails ||
+                policiesRes?.PolicyHeaders ||
+                policiesRes?.PolicyDetails ||
+                []
+            ).filter(
+                (p: any) =>
+                    (p.aliasName ?? p.AliasName)?.trim().toLowerCase() !== 'add-on policy',
+            );
+
+            // For MWC ecard, return comma-separated policy numbers for the employee
+            const policyNos = policies
+                .map((p: any) => p.polNo ?? p.PolicyNumber)
+                .filter(Boolean)
+                .join(',');
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Found ${policies.length} policies for employee ${empCode} in ${durationMs}ms`,
+                HRService.name,
+                { policyNos },
+            );
+
+            return { success: true, policyNos };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching employee policies for empCode ${empCode} after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, empCode },
+            );
+            return { error: 'Internal server error' };
+        }
+    }
 }
