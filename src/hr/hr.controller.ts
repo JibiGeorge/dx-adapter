@@ -723,4 +723,35 @@ export class HRController {
 
         return res.status(200).send(result.buffer);
     }
+
+    @All(['download-error-report', 'DownloadErrorReport'])
+    async downloadErrorReport(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Query('filename') queryFilename: string,
+        @Body('filename') bodyFilename: string,
+        @Res() res: Response,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const filename = queryFilename || bodyFilename || '';
+        if (!filename) {
+            return res.status(400).json({ error: 'filename is required' });
+        }
+
+        const result = await this.hrService.downloadErrorReport(tenantId, user, filename);
+
+        if (!result.success) {
+            return res.status(result.status || 500).json({ error: result.error });
+        }
+
+        res.set({
+            'Content-Type': result.contentType,
+            'Content-Disposition': result.contentDisposition,
+        });
+
+        return res.status(200).send(result.buffer);
+    }
 }
