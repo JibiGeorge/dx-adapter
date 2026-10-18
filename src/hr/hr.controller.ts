@@ -545,4 +545,16 @@ export class HRController {
         const dashboardType = body?.dashboardType || (body as any)?.dashboardtype || '';
         return this.hrService.getPowerBIData(tenantId, dashboardType);
     }
+
+    @Get('member-enrollment-mwc')
+    async getMemberEnrollmentMWC(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getMemberEnrollmentMWC(tenantId, user);
+    }
 }

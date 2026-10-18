@@ -64,4 +64,40 @@ export class ProclaimApiService {
       tenantId,
     );
   }
+
+  async getProclaimUserToken(
+    mediAuthUrl: string,
+    credentials: { username: string; password: string },
+    tenantId?: string,
+  ): Promise<any> {
+    const cleanUrl = mediAuthUrl.replace(/\/+$/, '');
+    const endpoint = `${cleanUrl}/Proclaim/Token`;
+
+    this.logger.debug(`Fetching Proclaim user token at: ${endpoint}`, ProclaimApiService.name, {
+      endpoint,
+      tenantId,
+      username: credentials?.username,
+    });
+
+    try {
+      const response = await this.httpService.post<any>(endpoint, credentials, {
+        tenantId,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(tenantId ? { 'Payer': tenantId } : {}),
+        },
+      });
+
+      return response;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `Failed to get proclaim token from ${endpoint}: ${err.message}`,
+        err.stack,
+        ProclaimApiService.name,
+        { endpoint, tenantId },
+      );
+      throw err;
+    }
+  }
 }

@@ -3427,14 +3427,14 @@ export class HRService {
 
         if (!corpId || corpId <= 0) {
             const corpIds = await this.claimService.resolveFallbackCorpIds(
-            normalizedTenantId,
-            user,
-            tenantConfig,
-            isLawton,
-        );
+                normalizedTenantId,
+                user,
+                tenantConfig,
+                isLawton,
+            );
             corpId = corpIds[0] || sessionCorpId;
         }
-        
+
 
         const effectivePolId = Number(
             body?.polId || body?.policyId || body?.memberPolicyId || 0,
@@ -4335,12 +4335,12 @@ export class HRService {
             const policiesRes: any =
                 scope.length > 0
                     ? await this.claimService.searchPolicies(
-                          scope,
-                          v2Url,
-                          v2Key,
-                          normalizedTenantId,
-                          false,
-                      )
+                        scope,
+                        v2Url,
+                        v2Key,
+                        normalizedTenantId,
+                        false,
+                    )
                     : null;
 
             const policies: any[] = (
@@ -4536,8 +4536,8 @@ export class HRService {
             const hospitals = Array.isArray(data?.hospitals)
                 ? data.hospitals
                 : Array.isArray(data?.Hospitals)
-                  ? data.Hospitals
-                  : [];
+                    ? data.Hospitals
+                    : [];
 
             const durationMs = Date.now() - startedAt;
             this.logger.debug(
@@ -4782,6 +4782,85 @@ export class HRService {
                 { tenantId: normalizedTenantId, dashboardType },
             );
             return { error: 'Internal server error loading Power BI dashboard' };
+        }
+    }
+
+    async getMemberEnrollmentMWC(
+        tenantId: string,
+        user: UserSessionPayload,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+            const sessionCorpId = Number((user as any)?.corpId || user?.providerCorpId || 0);
+            let corpId = sessionCorpId;
+            if (!corpId || corpId <= 0) {
+                const corpIds = await this.claimService.resolveFallbackCorpIds(
+                    normalizedTenantId,
+                    user,
+                    tenantConfig,
+                    isLawton,
+                );
+                corpId = corpIds[0] || sessionCorpId;
+            }
+
+            const mediAuthUrl = tenantConfig?.config?.auth?.api || '';
+            const proclaimUser = process.env.PROCLAIM_USER || '';
+            const proclaimPassword = process.env.PROCLAIM_PASSWORD || '';
+
+            if (!proclaimUser || !proclaimPassword) {
+                this.logger.error('Proclaim credentials not configured', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { error: 'Proclaim credentials not configured' };
+            }
+
+            if (!mediAuthUrl) {
+                this.logger.error('MediAuth URL not configured', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { error: 'MediAuth URL not configured' };
+            }
+
+            const tokenData: any = await this.proclaimApiService.getProclaimUserToken(
+                mediAuthUrl,
+                { username: proclaimUser, password: proclaimPassword },
+                normalizedTenantId,
+            );
+
+            const accessToken = tokenData?.accessToken?.access_token || tokenData?.access_token || '';
+            const durationMs = Date.now() - startedAt;
+
+            this.logger.debug(
+                `Member enrollment token retrieved successfully in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, corpId, userId: user?.userId },
+            );
+
+            return {
+                success: true,
+                accessToken,
+                loginEmailId: user?.emailId || '',
+                loginUserId: tokenData?.userId?.toString() || '',
+                loginUsername: tokenData?.username || user?.userName || '',
+                corporateId: corpId.toString(),
+                userType: (user as any)?.activePortal || 'hr',
+                identificationKey: process.env.MEM_ENROL_IDENTITY_KEY || '',
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching member enrollment token after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            return { error: 'Internal server error fetching enrollment token' };
         }
     }
 }
