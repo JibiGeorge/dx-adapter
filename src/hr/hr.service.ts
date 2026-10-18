@@ -5089,4 +5089,81 @@ export class HRService {
             return { error: 'Internal server error' };
         }
     }
+
+    async getEnrollmentFilterOptions(
+        tenantId: string,
+        user: UserSessionPayload,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const enrollmentApiUrl = tenantConfig?.config?.dataexchange?.api || '';
+            const enrollmentApiKey = tenantConfig?.config?.dataexchange?.key || '';
+
+            if (!enrollmentApiUrl) {
+                this.logger.error('Enrollment API URL not configured', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { success: false, error: 'Enrollment API URL not configured' };
+            }
+
+            const params = new URLSearchParams();
+            params.set('page', '1');
+            params.set('limit', '2000');
+
+            const portalName = user?.activePortal || 'hr';
+            if (portalName === 'broker' && (user as any)?.brokerId) {
+                params.set('broker_id', String((user as any).brokerId));
+            }
+
+            const data = await this.dxApiService.getEnrollments(
+                enrollmentApiUrl,
+                enrollmentApiKey,
+                params,
+            );
+
+            const rows: any[] = data?.rows || [];
+
+            const companySet = new Set<string>();
+            const fileSet = new Set<string>();
+            const policySet = new Set<string>();
+
+            for (const row of rows) {
+                if (row.company_name) companySet.add(String(row.company_name).trim());
+                if (row.ref_file) fileSet.add(String(row.ref_file).trim());
+                if (row.policy_no) policySet.add(String(row.policy_no).trim());
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Enrollment filter options loaded from ${rows.length} rows in ${durationMs}ms`,
+                HRService.name,
+                {
+                    tenantId: normalizedTenantId,
+                    companies: companySet.size,
+                    files: fileSet.size,
+                    policies: policySet.size,
+                },
+            );
+
+            return {
+                success: true,
+                companies: Array.from(companySet).sort(),
+                files: Array.from(fileSet).sort(),
+                policies: Array.from(policySet).sort(),
+            };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching enrollment filter options after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, userId: user?.userId },
+            );
+            return { success: false, error: 'Could not load filter options' };
+        }
+    }
 }

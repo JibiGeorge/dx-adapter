@@ -588,4 +588,16 @@ export class HRController {
             body.operation,
         );
     }
+
+    @Get('enrollment-filter-options')
+    async getEnrollmentFilterOptions(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getEnrollmentFilterOptions(tenantId, user);
+    }
 }
