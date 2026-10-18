@@ -365,4 +365,33 @@ export class HRController {
 
         return this.hrService.viewCoverageLetter(tenantId, user, host || '', body);
     }
+
+    @Post('coverage-letter')
+    async downloadCoverageLetter(
+        @Headers('x-tenant-id') tenantId: string,
+        @CurrentUser() user: UserSessionPayload,
+        @Headers('host') host: string,
+        @Body() body: ViewCoverageLetterDto,
+        @Res() res: Response,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const result = await this.hrService.downloadCoverageLetter(tenantId, user, host || '', body);
+
+        if ('pdfBuffer' in result) {
+            res.set({
+                'Content-Type': 'application/pdf',
+                'Content-Disposition': `attachment; filename="${result.fileName}.pdf"`,
+            });
+            return res.send(result.pdfBuffer);
+        }
+
+        return res.status(result.statusCode || 400).json({
+            isSuccess: false,
+            error: result.message,
+            message: result.message,
+        });
+    }
 }

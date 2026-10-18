@@ -3843,4 +3843,201 @@ export class HRService {
             };
         }
     }
+
+    async downloadCoverageLetter(
+        tenantId: string,
+        user: UserSessionPayload,
+        host: string,
+        body: any,
+    ): Promise<{ pdfBuffer: Buffer; fileName: string } | { isSuccess: false; message: string; statusCode: number }> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+
+        const corpIdBody = Number(body?.corpId || 0);
+        const sessionCorpId = Number((user as any)?.corpId || user?.providerCorpId || 0);
+        let corpId = corpIdBody > 0 ? corpIdBody : sessionCorpId;
+
+        const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+        const isLawton = normalizedTenantId === LAWTON_TENANT_ID;
+
+        if (!corpId || corpId <= 0) {
+            const corpIds = await this.claimService.resolveFallbackCorpIds(
+                normalizedTenantId,
+                user,
+                tenantConfig,
+                isLawton,
+            );
+            corpId = corpIds[0] || sessionCorpId;
+        }
+
+        let effBenefPriId = Number(body?.benefPriId || 0);
+        let effBenefId = Number(body?.benefId || 0);
+        let effPolId = Number(body?.memberPolicyId || body?.polId || body?.policyId || 0);
+        let effInsurerId = Number(body?.insurerId || 0);
+        const maidNum = Number(body?.maid || 0);
+        const printPattern = String(body?.printPattern || 'Single');
+
+        const v2Url = tenantConfig?.config?.claimApis?.v2;
+        const v2Key = tenantConfig?.config?.claimApis?.v2Key;
+        const ecardUrl = tenantConfig?.config?.services?.ecard || v2Url;
+        const appId = String(
+            process.env.APPLICATION_ID ||
+            tenantConfig?.config?.auth?.appId ||
+            '9240',
+        );
+
+        if ((!effBenefPriId || !effBenefId || !effPolId) && maidNum > 0 && v2Url) {
+            try {
+                const famRes = await this.claimService.getBeneficiaryFamily(maidNum, v2Url);
+                const members: any[] =
+                    famRes?.beneficiaryDetails ||
+                    famRes?.familyDetails?.beneficiaryDetails ||
+                    famRes?.BeneficiaryDetails ||
+                    [];
+                const match =
+                    members.find(
+                        (m: any) =>
+                            Number(m.benefMediAssistID || m.MediAssistID || m.mediAssistID || 0) === maidNum,
+                    ) || members[0];
+
+                if (match) {
+                    if (!effBenefPriId) {
+                        effBenefPriId = Number(
+                            match.benefPriID || match.primaryBenefDetails?.priBenefID || match.BenefPriID || 0,
+                        );
+                    }
+                    if (!effBenefId) {
+                        effBenefId = Number(
+                            match.benefUserID || match.benefUserId || match.benefId || match.BenefUserID || 0,
+                        );
+                    }
+                    if (!effPolId) {
+                        effPolId = Number(
+                            match.primaryBenefDetails?.memberPolId ||
+                            match.benefPolID ||
+                            match.policyDetail?.polID ||
+                            match.PolID ||
+                            0,
+                        );
+                    }
+                    if (!effInsurerId) {
+                        effInsurerId = Number(
+                            match.policyDetail?.polInsCompID || match.PolInsCompID || 0,
+                        );
+                    }
+                    if (!corpId || corpId <= 0) {
+                        corpId = Number(
+                            match.policyDetail?.pol_CorporateId || match.Pol_CorporateId || 0,
+                        );
+                    }
+                }
+            } catch (err) {
+                const error = err instanceof Error ? err : new Error(String(err));
+                this.logger.warn(
+                    `Failed to resolve beneficiary family in coverage-letter download: ${error.message}`,
+                    HRService.name,
+                );
+            }
+        }
+
+        if (!effBenefPriId || !effBenefId || !effPolId) {
+            return {
+                isSuccess: false,
+                message: 'benefPriId, benefId, memberPolicyId are required',
+                statusCode: 400,
+            };
+        }
+
+        this.logger.debug('Processing downloadCoverageLetter', HRService.name, {
+            tenantId: normalizedTenantId,
+            corpId,
+            effBenefPriId,
+            effBenefId,
+            effPolId,
+            effInsurerId,
+            printPattern,
+            appId,
+        });
+
+        try {
+            const request: any = {
+                PribenefId: effBenefPriId,
+                BenefId: effBenefId,
+                MemberPolicyId: effPolId,
+                MasterPolicyId: effPolId,
+                InsurerId: effInsurerId,
+                DbType: 'MAYFAIR',
+                OutputType: 'PDFByteStream',
+                CorporateId: corpId,
+                AppId: appId,
+                PrintPattern: printPattern,
+            };
+
+            let pdfresp: any = await this.ecardApiService.getCoverageLetter(
+                request,
+                ecardUrl,
+                v2Key,
+                normalizedTenantId,
+            );
+
+            let pdfBuffer: Buffer | null = null;
+            let fileName = 'coverage_letter';
+
+            if (pdfresp?.rawPdfBuffer && Buffer.isBuffer(pdfresp.rawPdfBuffer)) {
+                pdfBuffer = pdfresp.rawPdfBuffer;
+            } else if (pdfresp?.data?.[0]?.printResponse?.fileBytes) {
+                const fb = pdfresp.data[0].printResponse.fileBytes;
+                pdfBuffer = typeof fb === 'string' ? Buffer.from(fb, 'base64') : Buffer.from(fb);
+                fileName = pdfresp.data[0].printResponse.fileName || fileName;
+            }
+
+            if (!pdfBuffer || pdfBuffer.length === 0) {
+                request.DbType = 'MA';
+                pdfresp = await this.ecardApiService.getCoverageLetter(
+                    request,
+                    ecardUrl,
+                    v2Key,
+                    normalizedTenantId,
+                );
+                if (pdfresp?.rawPdfBuffer && Buffer.isBuffer(pdfresp.rawPdfBuffer)) {
+                    pdfBuffer = pdfresp.rawPdfBuffer;
+                } else if (pdfresp?.data?.[0]?.printResponse?.fileBytes) {
+                    const fb = pdfresp.data[0].printResponse.fileBytes;
+                    pdfBuffer = typeof fb === 'string' ? Buffer.from(fb, 'base64') : Buffer.from(fb);
+                    fileName = pdfresp.data[0].printResponse.fileName || fileName;
+                }
+            }
+
+            if (!pdfBuffer || pdfBuffer.length === 0) {
+                this.logger.warn('Coverage letter API returned no data for download', HRService.name, {
+                    request,
+                });
+                return { isSuccess: false, message: 'Coverage letter not available', statusCode: 404 };
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(`Downloaded coverage letter PDF successfully in ${durationMs}ms`, HRService.name, {
+                effBenefPriId,
+                effPolId,
+                fileName,
+                bufferSize: pdfBuffer.length,
+            });
+
+            return { pdfBuffer, fileName };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error downloading coverage letter after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, effBenefPriId, effPolId },
+            );
+            return {
+                isSuccess: false,
+                message: 'Internal server error fetching coverage letter',
+                statusCode: 500,
+            };
+        }
+    }
 }
