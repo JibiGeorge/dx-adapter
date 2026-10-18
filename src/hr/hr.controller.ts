@@ -612,4 +612,15 @@ export class HRController {
 
         return this.hrService.getUploadPolicyOptions(tenantId, user);
     }
+
+    @Get('enrollment-mappings')
+    async getEnrollmentMappings(
+        @Headers('x-tenant-id') tenantId: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        return this.hrService.getEnrollmentMappings(tenantId);
+    }
 }

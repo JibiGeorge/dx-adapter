@@ -328,4 +328,41 @@ export class DXApiService {
             throw err;
         }
     }
+
+    async getEnrollmentMeta(
+        baseUrl: string,
+        apiKey: string,
+    ): Promise<any> {
+        if (!baseUrl) {
+            this.logger.error('Enrollment API base URL is not configured', undefined, DXApiService.name);
+            throw new Error('Enrollment API URL is not configured.');
+        }
+
+        const cleanUrl = baseUrl.replace(/\/+$/, '');
+        const endpoint = `${cleanUrl}/api/enrolment-meta`;
+
+        this.logger.debug('Calling Enrollment meta API', DXApiService.name, {
+            endpoint,
+        });
+
+        try {
+            const response = await this.httpService.get<any>(endpoint, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-API-Key': apiKey,
+                },
+            });
+
+            return response;
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            this.logger.error(
+                `Enrollment meta request error: ${err.message}`,
+                err.stack,
+                DXApiService.name,
+                { endpoint },
+            );
+            throw err;
+        }
+    }
 }

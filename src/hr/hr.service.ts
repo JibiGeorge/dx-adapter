@@ -5314,4 +5314,63 @@ export class HRService {
             return { success: false, message: 'Server error fetching policy options' };
         }
     }
+
+    async getEnrollmentMappings(
+        tenantId: string,
+    ): Promise<any> {
+        const normalizedTenantId = tenantId.trim().toLowerCase();
+        const startedAt = Date.now();
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            const enrollmentApiUrl = tenantConfig?.config?.dataexchange?.api || '';
+            const enrollmentApiKey = tenantConfig?.config?.dataexchange?.key || '';
+
+            if (!enrollmentApiUrl) {
+                this.logger.error('Enrollment API URL not configured', undefined, HRService.name, {
+                    tenantId: normalizedTenantId,
+                });
+                return { error: 'Enrollment API URL not configured' };
+            }
+
+            const metaData: any = await this.dxApiService.getEnrollmentMeta(
+                enrollmentApiUrl,
+                enrollmentApiKey,
+            );
+
+            const mappings = (metaData?.mappings || [])
+                .filter(
+                    (m: any) =>
+                        m &&
+                        (m.is_enabled === null ||
+                            m.is_enabled === undefined ||
+                            m.is_enabled === true),
+                )
+                .map((m: any) => ({
+                    id: m.id,
+                    mapping_name: m.mapping_name,
+                    policy_type: m.policy_type,
+                    pol_id: m.pol_id,
+                }));
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Fetched ${mappings.length} enrollment mappings in ${durationMs}ms`,
+                HRService.name,
+                { tenantId: normalizedTenantId, count: mappings.length },
+            );
+
+            return { success: true, mappings };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching enrollment mappings after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId },
+            );
+            return { error: 'Internal server error fetching mappings' };
+        }
+    }
 }
