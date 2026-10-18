@@ -394,4 +394,21 @@ export class HRController {
             message: result.message,
         });
     }
+
+    @Get('policy-documents/:policyId')
+    async getPolicyDocuments(
+        @Headers('x-tenant-id') tenantId: string,
+        @Param('policyId') policyId: string,
+    ): Promise<any> {
+        if (!tenantId?.trim()) {
+            throw new BadRequestException('x-tenant-id header is required');
+        }
+
+        const polIdNum = Number(policyId);
+        if (!polIdNum) {
+            return { error: 'policyId is required' };
+        }
+
+        return this.hrService.getPolicyDocuments(tenantId, polIdNum);
+    }
 }

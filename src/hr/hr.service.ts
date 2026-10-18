@@ -4040,4 +4040,97 @@ export class HRService {
             };
         }
     }
+
+    async getPolicyDocuments(
+        tenantId: string,
+        policyId: number | string,
+    ): Promise<any> {
+        const startedAt = Date.now();
+        const normalizedTenantId = tenantId.trim();
+        const polIdNum = Number(policyId);
+
+        if (!polIdNum || polIdNum <= 0) {
+            return { success: false, error: 'policyId is required' };
+        }
+
+        this.logger.debug(`Fetching policy documents for policyId: ${polIdNum}`, HRService.name, {
+            tenantId: normalizedTenantId,
+            policyId: polIdNum,
+        });
+
+        try {
+            const tenantConfig = await this.tenantService.getFullTenantById(normalizedTenantId);
+            if (!tenantConfig) {
+                return { success: false, error: 'Tenant not found' };
+            }
+
+            const v2Url = tenantConfig.config?.claimApis?.v2;
+            const v2Key = tenantConfig.config?.claimApis?.v2Key;
+
+            const payload = {
+                policyIds: [polIdNum],
+                dbType: 'MA',
+            };
+
+            const responseObj: any = await this.claimService.getPolicyDocuments(
+                v2Url,
+                v2Key,
+                normalizedTenantId,
+                payload,
+            );
+
+            let documents: any[] = [];
+            const attachments =
+                responseObj?.attachments ||
+                responseObj?.Attachments ||
+                responseObj?.documents ||
+                responseObj?.Documents ||
+                [];
+
+            if (attachments?.length > 0) {
+                documents = attachments
+                    .filter((a: any) => {
+                        const type = a.attachmentType ?? a.AttachmentType;
+                        const filePath = a.dmsFilePath || a.DMSFilePath;
+                        const fileName = a.fileDisplayName || a.FileDisplayName;
+                        return (
+                            (type === 1 || type === 'POLICY_DOCUMENT_ATTACHMENT') &&
+                            filePath &&
+                            fileName
+                        );
+                    })
+                    .sort((a: any, b: any) => {
+                        const idB = Number(b.attachmentID ?? b.AttachmentID ?? 0);
+                        const idA = Number(a.attachmentID ?? a.AttachmentID ?? 0);
+                        return idB - idA;
+                    })
+                    .map((a: any) => {
+                        const filePath = a.dmsFilePath || a.DMSFilePath;
+                        return {
+                            fileName: a.fileDisplayName || a.FileDisplayName,
+                            downloadUrl: `api/v2/broker/download-file?fileGuid=${encodeURIComponent(filePath)}`,
+                        };
+                    });
+            }
+
+            const durationMs = Date.now() - startedAt;
+            this.logger.debug(
+                `Retrieved ${documents.length} policy documents in ${durationMs}ms`,
+                HRService.name,
+                { policyId: polIdNum, count: documents.length },
+            );
+
+            return { success: true, documents };
+        } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            const durationMs = Date.now() - startedAt;
+            this.logger.error(
+                `Error fetching policy documents after ${durationMs}ms: ${err.message}`,
+                err.stack,
+                HRService.name,
+                { tenantId: normalizedTenantId, policyId: polIdNum },
+            );
+            return { success: false, error: 'Internal server error fetching policy documents' };
+        }
+    }
 }
