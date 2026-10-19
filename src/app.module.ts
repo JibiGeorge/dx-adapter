@@ -18,6 +18,10 @@ import { AuthModule } from './auth/auth.module';
 import { TenantIdGuard } from '../common/guards/tenant-id.guard';
 import { BrokerModule } from './broker/broker.module';
 import { ProfileModule } from './profile/profile.module.js';
+import { EcardModule } from './ecard/ecard.module.js';
+import { ClaimsModule } from './claims/claims.module.js';
+import { ProviderModule } from './provider/provider.module.js';
+import { PolicyModule } from './policy/policy.module.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -39,6 +43,10 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     AuthModule,
     BrokerModule,
     ProfileModule,
+    EcardModule,
+    ClaimsModule,
+    ProviderModule,
+    PolicyModule,
   ],
   controllers: [AppController],
   providers: [

@@ -8,9 +8,17 @@ export class SearchClientDetailsDto {
   corpId?: number;
 
   @IsOptional()
+  @IsString()
+  corpName?: string;
+
+  @IsOptional()
   @Type(() => Number)
   @IsNumber()
   polId?: number;
+
+  @IsOptional()
+  @IsString()
+  polNo?: string;
 
   @IsOptional()
   @IsString()
@@ -27,6 +35,14 @@ export class SearchClientDetailsDto {
   @IsOptional()
   @IsString()
   staffId?: string;
+
+  @IsOptional()
+  @IsString()
+  empCode?: string;
+
+  @IsOptional()
+  @IsString()
+  memberId?: string;
 
   @IsOptional()
   @Type(() => Number)
@@ -126,3 +142,45 @@ export class UpdateBeneficiaryDto {
   @IsString()
   expiryDate?: string;
 }
+
+export class DownloadEcardDto {
+  @IsString()
+  maid: string;
+
+  @Type(() => Number)
+  @IsNumber()
+  polid: number;
+
+  @IsOptional()
+  insurerid?: string | number;
+
+  @IsOptional()
+  polSubtype?: number;
+
+  @IsOptional()
+  @IsString()
+  printPattern?: string;
+}
+
+export class DownloadCoverageDto {
+  @IsOptional()
+  benefPriId?: string | number;
+
+  @IsOptional()
+  benefUserId?: string | number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  polid?: number;
+
+  @IsOptional()
+  insurerId?: string | number;
+
+  @IsOptional()
+  corporateId?: string | number;
+
+  @IsString()
+  maid: string;
+}
+

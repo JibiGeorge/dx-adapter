@@ -19,7 +19,12 @@ import type { UploadedMulterFile } from './broker.types.js';
 import { GetFormFieldDto } from './dto/form-field.dto.js';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { SubmitClaimDto } from './dto/submit-claim.dto.js';
-import { SearchClientDetailsDto, UpdateBeneficiaryDto } from './dto/client-details.dto.js';
+import {
+  SearchClientDetailsDto,
+  UpdateBeneficiaryDto,
+  DownloadEcardDto,
+  DownloadCoverageDto,
+} from './dto/client-details.dto.js';
 
 @Controller('broker')
 @UseGuards(JwtAuthGuard, BrokerRoleGuard)
@@ -262,5 +267,29 @@ export class BrokerController {
       throw new BadRequestException('x-tenant-id header is required');
     }
     return this.brokerService.updateClientDetailsBeneficiary(tenantId, user, maid, dto);
+  }
+
+  @Post('client-details/ecard')
+  async downloadClientDetailsEcard(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Body() dto: DownloadEcardDto,
+  ) {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+    return this.brokerService.downloadClientDetailsEcard(tenantId, user, dto);
+  }
+
+  @Post('client-details/coverage')
+  async downloadClientDetailsCoverage(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Body() dto: DownloadCoverageDto,
+  ) {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+    return this.brokerService.downloadClientDetailsCoverage(tenantId, user, dto);
   }
 }

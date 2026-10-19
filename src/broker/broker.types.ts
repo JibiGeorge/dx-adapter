@@ -150,27 +150,60 @@ export interface ClientDetailsMember {
   relation: string;
   policyStatus: string;
   inceptionDate: string;
+  originalEntryDate?: string;
   startDate: string;
   endDate: string;
+  effectiveExpiry?: string;
   memberStatus: 'Active' | 'Inactive';
   isBenefActive: boolean;
   planType: string;
   polNo: string;
   corpName: string;
+  insuranceCompany?: string;
+  policyId?: number;
+  insurerId?: number;
+  priBenefId?: number;
+  benefUserId?: number;
 }
 
 export interface ClientDetailsSearchResponse {
   isSuccess: boolean;
   totalCount: number;
+  total?: number;
   page: number;
   limit: number;
   members: ClientDetailsMember[];
   error?: string;
 }
 
+export interface ClientDetailsPolicyInfo {
+  category: string;
+  insuranceCompany: string;
+  policyNumber: string;
+  validityPeriod: string;
+  planType: string;
+  planName: string;
+  policyId?: number;
+  insurerId?: number;
+}
+
+export interface ClientDetailsBeneficiaryItem {
+  maid: string;
+  name: string;
+  relation: string;
+  pihNumber: string;
+  staffId: string;
+  status: string;
+  isActive: boolean;
+  policyId?: number;
+  insurerId?: number;
+}
+
 export interface ClientDetailsBeneficiaryResponse {
   isSuccess: boolean;
   data?: Record<string, any>;
+  policy?: ClientDetailsPolicyInfo;
+  beneficiaries?: ClientDetailsBeneficiaryItem[];
   dependents?: ClientDetailsMember[];
   message?: string;
 }
