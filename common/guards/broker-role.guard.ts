@@ -16,11 +16,18 @@ export class BrokerRoleGuard implements CanActivate {
       throw new ForbiddenException('User session not found.');
     }
 
-    const isBroker = Boolean(user.roles?.isBroker || user.activePortal === 'broker' || user.brokerId);
+    const isBrokerOrHR = Boolean(
+      user.roles?.isBroker ||
+      user.roles?.isCorpHR ||
+      user.activePortal === 'broker' ||
+      user.activePortal === 'hr' ||
+      user.brokerId ||
+      user.providerCorpId
+    );
 
-    if (!isBroker) {
+    if (!isBrokerOrHR) {
       throw new ForbiddenException(
-        'Access denied: You do not have permissions to access Broker resources.',
+        'Access denied: You do not have permissions to access this resource.',
       );
     }
 

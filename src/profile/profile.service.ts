@@ -4,9 +4,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { InjectConnection } from '@nestjs/mongoose';
 import { ConfigService } from '@nestjs/config';
-import { Connection, Collection } from 'mongoose';
 import * as path from 'path';
 import { TenantService } from '../tenant/tenant.service.js';
 import { LoggingService } from '../../common/logging/logging.service.js';
@@ -19,30 +17,16 @@ import type { UploadedMulterFile } from '../broker/broker.types.js';
 
 @Injectable()
 export class ProfileService {
-  private readonly overridesCollection: Collection | null = null;
-
   constructor(
     private readonly tenantService: TenantService,
     private readonly loggingService: LoggingService,
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
-    @InjectConnection() connection: Connection,
-  ) {
-    const dbName = this.configService.get<string>('CONFIG_MONGO_DB');
-    if (dbName) {
-      this.overridesCollection = connection
-        .useDb(dbName)
-        .collection('UserProfileOverrides');
-    } else {
-      this.loggingService.warn(
-        'CONFIG_MONGO_DB is not defined in environment. UserProfileOverrides queries will be skipped.',
-        'ProfileService',
-      );
-    }
-  }
+  ) {}
 
   /**
-   * Helper to resolve DMS host and app credentials for a tenant.
+   * Helper to resolve DMS host, MediAuth host, and app credentials for a tenant.
+   * Includes defensive domain normalization (.com safeguard).
    */
   private async resolveDmsConfig(tenantId: string) {
     const isLawton =
@@ -58,7 +42,9 @@ export class ProfileService {
       ? 'https://uat-maglobal.lawtonasia.com/'
       : 'https://maglobal.mayfairwecare.in/';
 
-    let authUrl = '';
+    let authUrl = isLawton
+      ? 'https://uat-lawton-coreauth.lawtonasia.com'
+      : 'https://auth.mayfairwecare.in';
 
     try {
       const tenantConfig = await this.tenantService.getFullTenantById(
@@ -71,7 +57,11 @@ export class ProfileService {
         appUrl = tenantConfig.config.app.url.replace(/\/?$/, '/');
       }
       if (tenantConfig?.config?.auth?.api) {
-        authUrl = tenantConfig.config.auth.api.replace(/\/+$/, '');
+        let rawApi = tenantConfig.config.auth.api.replace(/\/+$/, '');
+        if (rawApi.includes('lawtonasia') && !rawApi.includes('lawtonasia.com')) {
+          rawApi = rawApi.replace('lawtonasia', 'lawtonasia.com');
+        }
+        authUrl = rawApi;
       }
     } catch (e: any) {
       this.loggingService.warn(
@@ -84,7 +74,8 @@ export class ProfileService {
   }
 
   /**
-   * Resolve user profile details, prioritizing database overrides and tenant-specific formatting.
+   * Resolve user profile details directly from upstream MediAuth or active session.
+   * Zero MongoDB overrides: Single Source of Truth from backend IPMI/MediAuth.
    */
   async getProfile(
     tenantId: string,
@@ -94,22 +85,6 @@ export class ProfileService {
       throw new BadRequestException('x-tenant-id header is required');
     }
 
-    const loginName = user.loginName || user.emailId;
-    let override: Record<string, any> | null = null;
-    if (this.overridesCollection) {
-      try {
-        override = await this.overridesCollection.findOne({
-          loginName: { $regex: new RegExp(`^${loginName}$`, 'i') },
-        });
-      } catch (err: any) {
-        this.loggingService.warn(
-          `Failed to query UserProfileOverrides: ${err.message}`,
-          'ProfileService',
-        );
-      }
-    }
-
-    // Tenant-specific phone prefix: Lawton Asia uses Thai mobile prefix (+66-), Mayfair uses standard (+91- / international)
     const isLawton =
       tenantId.includes('Lawton') ||
       tenantId === 'MzAyNHxMYXd0b25Bc2lhIzIwMjZATWF5';
@@ -118,11 +93,13 @@ export class ProfileService {
     const { dmsHost, appId, appUrl, authUrl } =
       await this.resolveDmsConfig(tenantId);
 
-    // 1. Fetch live user profile directly from upstream MediAuth so updates from UAT portal or external systems reflect immediately
+    // 1. Fetch live user profile directly from upstream MediAuth
     let upstreamAvatar = '';
     let upstreamEmail = '';
     let upstreamMobile = '';
     let upstreamAddress = '';
+    let upstreamAltMobile = '';
+    let upstreamAltEmail = '';
 
     if (authUrl && user.accessToken) {
       try {
@@ -145,7 +122,7 @@ export class ProfileService {
             baseProfile.profileImages ?? baseProfile.ProfileImages ?? [];
 
           const img = profileImages.find(
-            (i) =>
+            (i: any) =>
               i.imageTag === 'ProfileImgPath' ||
               i.ImageTag === 'ProfileImgPath',
           );
@@ -175,6 +152,14 @@ export class ProfileService {
             baseProfile.MobileNo ||
             baseProfile.mobile ||
             '';
+          upstreamAltMobile =
+            baseProfile.altMobileNo ||
+            baseProfile.AltMobileNo ||
+            '';
+          upstreamAltEmail =
+            baseProfile.altEmailId ||
+            baseProfile.AltEmailId ||
+            '';
 
           const userAddresses =
             baseProfile.userAddresses ||
@@ -202,16 +187,13 @@ export class ProfileService {
       }
     }
 
-    // Prioritize live upstream values so updates in external systems reflect immediately
-    const rawMobile =
-      upstreamMobile ||
-      override?.mobile ||
-      user.mobile ||
-      '';
+    const rawMobile = upstreamMobile || user.mobile || '';
     const cleanMobile = rawMobile.replace(/^(\+66-|\+91-|\+)/, '');
 
-    const resolvedEmail = upstreamEmail || override?.emailId || user.emailId;
-    const resolvedAddress = upstreamAddress || override?.address || user.address || '';
+    const resolvedEmail = upstreamEmail || user.emailId || '';
+    const resolvedAddress = upstreamAddress || user.address || '';
+    const resolvedAltMobile = upstreamAltMobile || user.altMobile || '';
+    const resolvedAltEmail = upstreamAltEmail || user.altEmailId || '';
 
     const roleName = user.roles.isBroker
       ? 'Broker'
@@ -245,8 +227,8 @@ export class ProfileService {
       emailId: resolvedEmail,
       mobile: cleanMobile,
       address: resolvedAddress,
-      altMobile: override?.altMobile ?? user.altMobile ?? '',
-      altEmailId: override?.altEmailId ?? user.altEmailId ?? '',
+      altMobile: resolvedAltMobile,
+      altEmailId: resolvedAltEmail,
       profileImgUrl: resolvedAvatar,
       maid: user.maid,
       empCode: user.empCode,
@@ -257,7 +239,8 @@ export class ProfileService {
   }
 
   /**
-   * Updates basic information (address, mobile, email) in upstream auth service and local database.
+   * Updates basic information (address, mobile, email) directly in upstream MediAuth.
+   * Zero MongoDB overrides: Directly syncs to IPMI/MediAuth backend.
    */
   async updateBasicInfo(
     tenantId: string,
@@ -273,43 +256,13 @@ export class ProfileService {
     const cleanAddress = (dto.address || '').trim();
     const cleanEmail = (dto.email || '').trim();
 
-    // 1. Update in local MongoDB overrides for instant consistency across portals
-    if (this.overridesCollection) {
-      try {
-        await this.overridesCollection.updateOne(
-          { loginName: { $regex: new RegExp(`^${loginName}$`, 'i') } },
-          {
-            $set: {
-              tenantId,
-              loginName,
-              address: cleanAddress,
-              mobile: cleanMobile,
-              emailId: cleanEmail,
-              altMobile: dto.altMobile || '',
-              altEmailId: dto.altEmailId || '',
-              updatedAt: new Date(),
-            },
-          },
-          { upsert: true },
-        );
-      } catch (err: any) {
-        this.loggingService.warn(
-          `Failed to persist profile override in MongoDB: ${err.message}`,
-          'ProfileService',
-        );
-      }
-    }
-
-    // 2. Forward to upstream MediAuth if configured
     try {
-      const tenantConfig = await this.tenantService.getFullTenantById(
-        tenantId.trim(),
-      );
-      const authUrl = tenantConfig.config.auth.api?.replace(/\/+$/, '');
-      const appId = String(tenantConfig.config.auth.appId);
+      const { appId, authUrl } = await this.resolveDmsConfig(tenantId);
+      const isLawton =
+        tenantId.includes('Lawton') ||
+        tenantId === 'MzAyNHxMYXd0b25Bc2lhIzIwMjZATWF5';
 
       if (authUrl && user.accessToken) {
-        const isLawton = tenantId === 'MzAyNHxMYXd0b25Bc2lhIzIwMjZATWF5';
         const userAddresses = cleanAddress
           ? [
               {
@@ -356,6 +309,7 @@ export class ProfileService {
         `Upstream UpdateBaseUserProfile notice: ${err.message}`,
         'ProfileService',
       );
+      throw new ServiceUnavailableException('Unable to communicate with authentication service to update profile.');
     }
 
     return {
@@ -407,11 +361,7 @@ export class ProfileService {
 
     // Call upstream MediAuth ChangePassword service
     try {
-      const tenantConfig = await this.tenantService.getFullTenantById(
-        tenantId.trim(),
-      );
-      const authUrl = tenantConfig.config.auth.api?.replace(/\/+$/, '');
-      const appId = String(tenantConfig.config.auth.appId);
+      const { appId, authUrl } = await this.resolveDmsConfig(tenantId);
 
       if (authUrl) {
         const res = await this.httpService.post<any>(
@@ -444,6 +394,10 @@ export class ProfileService {
         `Upstream ChangePassword note: ${err.message}`,
         'ProfileService',
       );
+      return {
+        success: false,
+        message: 'Failed to update password in authentication service. Please verify your current password.',
+      };
     }
 
     return {
@@ -453,7 +407,8 @@ export class ProfileService {
   }
 
   /**
-   * Uploads and updates the user's profile picture across central DMS, upstream MediAuth, and local database.
+   * Uploads and updates the user's profile picture across central DMS and upstream MediAuth.
+   * Zero MongoDB overrides: DMS provides the asset, MediAuth stores the FileGuid reference.
    */
   async uploadProfilePicture(
     tenantId: string,
@@ -486,7 +441,7 @@ export class ProfileService {
     const { dmsHost, appId, appUrl, authUrl } =
       await this.resolveDmsConfig(tenantId);
 
-    // 1. Upload to Central DMS so that UAT portal and all microservices share the exact same asset
+    // 1. Upload to Central DMS so that all microservices share the exact same asset
     let dmsFileGuid = '';
     try {
       const formData = new FormData();
@@ -531,42 +486,21 @@ export class ProfileService {
       );
     }
 
-    // 2. Persist DMS FileGuid and metadata into MongoDB overrides (do not store competing base64 profileImgUrl)
-    if (this.overridesCollection) {
-      try {
-        await this.overridesCollection.updateOne(
-          { loginName: { $regex: new RegExp(`^${loginName}$`, 'i') } },
-          {
-            $set: {
-              tenantId,
-              loginName,
-              dmsFileGuid: dmsFileGuid || '',
-              updatedAt: new Date(),
-            },
-            $unset: {
-              profileImgUrl: '',
-            },
-          },
-          { upsert: true },
-        );
-      } catch (err: any) {
-        this.loggingService.warn(
-          `Failed to persist avatar in MongoDB: ${err.message}`,
-          'ProfileService',
-        );
-      }
-    }
-
-    // 3. Sync to upstream MediAuth with the DMS FileGuid (legacy portal expects FileGuid)
+    // 2. Sync to upstream MediAuth with the DMS FileGuid and full baseProfile (legacy portal pattern)
     const imagePayload = dmsFileGuid || base64Url;
     if (authUrl && user.accessToken && imagePayload) {
       try {
-        await this.httpService.post(
+        const cleanMobile = (user.mobile || '').replace(/^(\+66-|\+91-|\+)/, '').trim();
+        const syncRes = await this.httpService.post<any>(
           `${authUrl}/UserDetails/UpdateBaseUserProfile`,
           {
             ApplicationId: appId,
             AuthToken: user.accessToken,
             baseProfile: {
+              Address: user.address || '',
+              MobileNo: cleanMobile,
+              EmailId: user.emailId || '',
+              FirstLogin: false,
               ProfileImages: [
                 {
                   ImageTag: 'ProfileImgPath',
@@ -579,9 +513,15 @@ export class ProfileService {
           { tenantId },
         );
         this.loggingService.log(
-          `Profile picture synced to upstream MediAuth for user ${loginName} with guid: ${dmsFileGuid}`,
+          `Profile picture synced to upstream MediAuth for user ${loginName} with guid: ${dmsFileGuid}: ${JSON.stringify(syncRes)}`,
           'ProfileService',
         );
+        if (syncRes && syncRes.isSuccess === false) {
+          this.loggingService.warn(
+            `MediAuth UpdateBaseUserProfile returned false: ${syncRes.errorMessage || syncRes.message}`,
+            'ProfileService',
+          );
+        }
       } catch (err: any) {
         this.loggingService.warn(
           `Upstream MediAuth profile picture sync note: ${err.message}`,

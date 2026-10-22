@@ -7,8 +7,10 @@ import {
   Param,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import type { UserSessionPayload } from '../auth/auth.types.js';
@@ -68,6 +70,30 @@ export class PolicyController {
       tenantId,
       Number(policyId) || 0,
     );
+  }
+
+  @Get('attachment/:fileGuid')
+  async downloadAttachment(
+    @Headers('x-tenant-id') tenantId: string,
+    @Param('fileGuid') fileGuid: string,
+    @Res() res: Response,
+    @Query('fileName') fileName?: string,
+  ) {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+    const result = await this.policyService.downloadDmsAttachment(
+      tenantId,
+      fileGuid,
+      fileName,
+    );
+    res.setHeader('Content-Type', result.contentType);
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="${encodeURIComponent(result.fileName)}"`,
+    );
+    res.setHeader('Content-Length', result.buffer.length);
+    res.send(result.buffer);
   }
 
   @Post('lives-batch')

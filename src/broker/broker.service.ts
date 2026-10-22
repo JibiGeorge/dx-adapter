@@ -1563,6 +1563,62 @@ export class BrokerService {
     tenantId: string,
     user: UserSessionPayload,
   ): Promise<{ isSuccess: boolean; entities: ClientDetailsEntity[] }> {
+    const isHR = Boolean(user.roles?.isCorpHR || user.activePortal === 'hr');
+    const hrCorpId = Number(user.providerGroupCorpId || user.providerCorpId || 0);
+
+    if (isHR && hrCorpId > 0) {
+      const trimmedTenantId = tenantId.trim();
+      const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
+      const claimApis = tenantConfig.config?.claimApis;
+
+      if (claimApis?.v2) {
+        try {
+          const groupCorpResponse = await this.claimApiService.searchPoliciesByGroupCorp(
+            hrCorpId,
+            trimmedTenantId,
+            claimApis.v2,
+            claimApis.v2Key || '123412341234',
+            false,
+          );
+
+          const v2Policies = groupCorpResponse?.policyDetails ?? (groupCorpResponse as any)?.PolicyDetails ?? [];
+          const entityMap = new Map<number, string>();
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+
+          for (const p of v2Policies) {
+            const cid = Number(p.pol_CorporateId ?? p.corporateId ?? p.CorporateId ?? 0);
+            const cname = (p.polHolderName || p.PolHolderName || p.corporateName || '').trim();
+            const endDate = this.parseDate(p.polEndDate ?? p.PolEndDate);
+            if (endDate && endDate < today) {
+              continue;
+            }
+            if (cid > 0 && cname && !entityMap.has(cid)) {
+              entityMap.set(cid, cname);
+            }
+          }
+
+          if (entityMap.size > 0) {
+            const sortedEntities = Array.from(entityMap.entries())
+              .map(([corpId, corpName]) => ({ corpId, corpName }))
+              .sort((a, b) => a.corpName.localeCompare(b.corpName, undefined, { sensitivity: 'base' }));
+
+            return {
+              isSuccess: true,
+              entities: sortedEntities,
+            };
+          }
+        } catch (err: any) {
+          this.logger.warn(`Failed fetching HR group entities: ${err.message}`, BrokerService.name);
+        }
+      }
+
+      return {
+        isSuccess: true,
+        entities: [{ corpId: hrCorpId, corpName: user.loginName || 'Corporate Client' }],
+      };
+    }
+
     const policyResult = await this.getPolicyList(tenantId, user);
     const policies = policyResult?.policies || [];
 
@@ -1822,19 +1878,46 @@ export class BrokerService {
 
   /**
    * Helper to parse date formats (/Date(timestamp)/ or ISO strings).
+   * When preferUtc is true, Date(timestamp) and Date objects are formatted using UTC date parts.
    */
-  private parseDateStr(raw: any): string {
+  private parseDateStr(raw: any, preferUtc = false): string {
     if (!raw) return '-';
-    if (typeof raw === 'string' && raw.includes('/Date(')) {
-      const match = raw.match(/\/Date\((\d+)/);
-      if (match) {
-        const d = new Date(Number(match[1]));
-        return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-');
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    if (typeof raw === 'string') {
+      const trimmed = raw.trim();
+      if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
+        const parts = trimmed.split('T')[0].split('-');
+        const year = parts[0];
+        const monthNum = parseInt(parts[1], 10) - 1;
+        const day = parts[2].padStart(2, '0');
+        if (monthNum >= 0 && monthNum <= 11) {
+          return `${day}-${months[monthNum]}-${year}`;
+        }
+      }
+      if (trimmed.includes('/Date(')) {
+        const match = trimmed.match(/\/Date\((\d+)/);
+        if (match) {
+          const d = new Date(Number(match[1]));
+          if (preferUtc) {
+            const day = String(d.getUTCDate()).padStart(2, '0');
+            const month = months[d.getUTCMonth()];
+            const year = d.getUTCFullYear();
+            return `${day}-${month}-${year}`;
+          }
+          return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-');
+        }
       }
     }
     try {
       const d = new Date(raw);
-      return isNaN(d.getTime()) ? String(raw) : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-');
+      if (isNaN(d.getTime())) return String(raw);
+      if (preferUtc) {
+        const day = String(d.getUTCDate()).padStart(2, '0');
+        const month = months[d.getUTCMonth()];
+        const year = d.getUTCFullYear();
+        return `${day}-${month}-${year}`;
+      }
+      return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-');
     } catch {
       return String(raw);
     }
@@ -1870,24 +1953,29 @@ export class BrokerService {
     const limit = Math.max(1, Math.min(100, Number(dto.limit) || 20));
     const offset = (page - 1) * limit;
 
-    // 1. Primary path: Use Claim API v2 (matching legacy portal)
+    // 1. Primary path: Use Claim API v2 (matching legacy portal BuildBrokerPolicySearchModel)
     const v2Url = tenantConfig.config?.claimApis?.v2;
     const v2Key = tenantConfig.config?.claimApis?.v2Key || '123412341234';
 
     if (v2Url) {
       try {
-        const payload: Record<string, any> = {
-          BeneficiaryName: dto.name?.trim() || null,
-          BenefEmail: dto.email?.trim() || null,
-          EmployeeNo: dto.staffId?.trim() || dto.empCode?.trim() || null,
+        const searchByName = Boolean(dto.name?.trim());
+        const searchByEmail = Boolean(dto.email?.trim());
+        const searchByEmp = Boolean(dto.staffId?.trim() || dto.empCode?.trim());
+        const polIdNum = dto.polId && Number(dto.polId) > 0 ? Number(dto.polId) : 0;
+        const corpIdNum = dto.corpId && Number(dto.corpId) > 0 ? Number(dto.corpId) : 0;
+
+        // Stage 1: Exact legacy BuildBrokerPolicySearchModel payload (Range: 100, PolicyCorpIds, PolicyIds)
+        const stage1Payload: Record<string, any> = {
+          BeneficiaryName: searchByName ? dto.name?.trim() : null,
+          BenefEmail: searchByEmail ? dto.email?.trim() : null,
+          EmployeeNo: searchByEmp ? (dto.staffId?.trim() || dto.empCode?.trim()) : null,
           AllowFuzzinessInBenefName: false,
           PercentageMatchForFuzziness: 0,
-          Range: limit,
-          StartIndex: offset,
-          PolicyNo: dto.polNo?.trim() || null,
-          PolicyHolder: dto.corpName?.trim() || null,
-          PolicyCorpIds: dto.corpId && Number(dto.corpId) > 0 ? [Number(dto.corpId)] : null,
-          PolicyIds: dto.polId && Number(dto.polId) > 0 ? [Number(dto.polId)] : null,
+          Range: 100,
+          StartIndex: 0,
+          PolicyCorpIds: corpIdNum > 0 ? [corpIdNum] : null,
+          PolicyIds: polIdNum > 0 ? [polIdNum] : null,
         };
 
         const v2Res = await fetch(`${v2Url.replace(/\/+$/, '')}/api/v2/BeneficiarySearch/.json`, {
@@ -1897,16 +1985,54 @@ export class BrokerService {
             'X-CA-SHARED-KEY': v2Key,
             'Payer': trimmedTenantId,
           },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(stage1Payload),
         });
 
+        let rawList: any[] = [];
         if (v2Res.ok) {
           const v2Data = await v2Res.json();
-          let rawList = v2Data.beneficiaryDetails || [];
+          rawList = v2Data.beneficiaryDetails || [];
+        }
 
-          // 1. Strict policy scoping (matching legacy portal: BuildBrokerPolicySearchModel / GetDetailsforEcard)
-          if (dto.polId && Number(dto.polId) > 0) {
-            rawList = rawList.filter((b: any) => Number(b.policyDetail?.polID) === Number(dto.polId));
+        // Stage 2: Legacy fallback when Stage 1 yields 0 records and policy number is present (polNo + DbType='MA')
+        if (rawList.length === 0 && dto.polNo?.trim()) {
+          try {
+            const stage2Payload: Record<string, any> = {
+              BeneficiaryName: searchByName ? dto.name?.trim() : null,
+              BenefEmail: searchByEmail ? dto.email?.trim() : null,
+              EmployeeNo: searchByEmp ? (dto.staffId?.trim() || dto.empCode?.trim()) : null,
+              PolicyNo: dto.polNo.trim(),
+              AllowFuzzinessInBenefName: false,
+              PercentageMatchForFuzziness: 0,
+              Range: 100,
+              StartIndex: 0,
+              PolicyCorpIds: corpIdNum > 0 ? [corpIdNum] : null,
+              DbType: 'MA',
+            };
+
+            const stage2Res = await fetch(`${v2Url.replace(/\/+$/, '')}/api/v2/BeneficiarySearch/.json`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-CA-SHARED-KEY': v2Key,
+                'Payer': trimmedTenantId,
+              },
+              body: JSON.stringify(stage2Payload),
+            });
+
+            if (stage2Res.ok) {
+              const stage2Data = await stage2Res.json();
+              rawList = stage2Data.beneficiaryDetails || [];
+            }
+          } catch (stg2Err: any) {
+            this.logger.warn(`Stage 2 polNo fallback error: ${stg2Err.message}`, BrokerService.name);
+          }
+        }
+
+        if (rawList.length > 0) {
+          // 1. Policy scoping (matching legacy portal: BuildBrokerPolicySearchModel)
+          if (polIdNum > 0) {
+            rawList = rawList.filter((b: any) => Number(b.policyDetail?.polID) === polIdNum);
           } else if (dto.polNo?.trim()) {
             const polNoNorm = dto.polNo.trim().toLowerCase();
             rawList = rawList.filter((b: any) =>
@@ -1914,29 +2040,7 @@ export class BrokerService {
             );
           }
 
-          // Note: Corporate scoping is already enforced via payload.PolicyCorpIds in the Claim API v2 request.
-          // In-memory pol_CorporateId is an internal IPMI surrogate key (e.g. 1422104) and must not be compared to ProviderCorpID.
-
-          // 3. Exclude expired policies (matching legacy portal: PolEndDate >= DateTime.Today)
-          const today = new Date();
-          today.setHours(0, 0, 0, 0);
-          rawList = rawList.filter((b: any) => {
-            const endStr = b.policyDetail?.polEndDate || b.benefWETo;
-            if (!endStr) return true;
-            const endDate = this.parseDate(endStr);
-            return !endDate || endDate >= today;
-          });
-
-          // 4. Optional plan filter (e.g. "IPMI")
-          if (dto.plan?.trim() && dto.plan.trim() !== '0' && !dto.plan.toLowerCase().includes('select plan')) {
-            const planNorm = dto.plan.trim().toLowerCase();
-            rawList = rawList.filter((b: any) =>
-              (b.benefPlanType && b.benefPlanType.toLowerCase().includes(planNorm)) ||
-              (b.primaryBenefDetails?.priBenefGrade && b.primaryBenefDetails.priBenefGrade.toLowerCase().includes(planNorm))
-            );
-          }
-
-          // 5. Deduplicate by MediAssistID (matching legacy portal: details.GroupBy(x => x.MediAssistID).Select(g => g.First()))
+          // 2. Deduplicate by MediAssistID (matching legacy portal: details.GroupBy(x => x.MediAssistID).Select(g => g.First()))
           const seenMaids = new Set<string>();
           rawList = rawList.filter((b: any) => {
             const mId = String(b.benefMediAssistID || '');
@@ -1946,16 +2050,105 @@ export class BrokerService {
             return true;
           });
 
+          // 3. Enrich via Claim API v3 FetchMemberPolicyDetails (exact legacy portal ElasticAPI.cs logic)
+          const v3Url = tenantConfig.config?.claimApis?.v3;
+          if (v3Url && rawList.length > 0) {
+            const uniqueMemberPolIds = Array.from(
+              new Set(
+                rawList
+                  .map((b: any) => Number(b.primaryBenefDetails?.memberPolId || b.benefMemberPolicyId))
+                  .filter((id: number) => id && id > 0),
+              ),
+            );
+
+            if (uniqueMemberPolIds.length > 0) {
+              const memberDetailsMap = new Map<number, any>();
+              await Promise.all(
+                uniqueMemberPolIds.map(async (mPolId) => {
+                  try {
+                    const v3Res = await fetch(`${v3Url.replace(/\/+$/, '')}/FetchMemberPolicyDetails`, {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        'X-CA-SHARED-KEY': v2Key,
+                        'Payer': trimmedTenantId,
+                      },
+                      body: JSON.stringify({ polId: mPolId, dbType: 'MA' }),
+                    });
+                    if (v3Res.ok) {
+                      const v3Data = await v3Res.json();
+                      const detail = v3Data?.memberDetails?.[0];
+                      if (detail) {
+                        memberDetailsMap.set(mPolId, detail);
+                      }
+                    }
+                  } catch (v3Err: any) {
+                    this.logger.warn(`FetchMemberPolicyDetails failed for polId ${mPolId}: ${v3Err.message}`, BrokerService.name);
+                  }
+                }),
+              );
+
+              // Apply enrichment to rawList matching ElasticAPI.cs
+              for (const b of rawList) {
+                const mPolId = Number(b.primaryBenefDetails?.memberPolId || b.benefMemberPolicyId);
+                const detail = memberDetailsMap.get(mPolId);
+                if (detail) {
+                  if (detail.travelStartDate) {
+                    if (!b.policyDetail) b.policyDetail = {};
+                    b.policyDetail.polStartDate = detail.travelStartDate;
+                  }
+                  if (detail.travelEndDate) {
+                    if (!b.policyDetail) b.policyDetail = {};
+                    b.policyDetail.polEndDate = detail.travelEndDate;
+                  }
+                  if (detail.memberPolicyStatus) {
+                    b.memberPolicyStatus = detail.memberPolicyStatus;
+                  }
+                  if (detail.actualEmpCode || detail.employeeCode) {
+                    b.actualEmpCode = detail.actualEmpCode || detail.employeeCode;
+                  }
+                  if (detail.planDetails?.[0]?.typeOfPlan) {
+                    b.benefPlanType = detail.planDetails[0].typeOfPlan;
+                  }
+                  if (detail.travelCountry && b.primaryBenefDetails) {
+                    b.primaryBenefDetails.countryOfCoverage = detail.travelCountry;
+                  }
+                }
+              }
+            }
+          }
+
+          // 4. Exclude expired policies (matching legacy portal: PolEndDate >= DateTime.Today)
+          // CRITICAL: Must execute AFTER v3 FetchMemberPolicyDetails enrichment because v3 sets b.policyDetail.polEndDate (travelEndDate)
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          rawList = rawList.filter((b: any) => {
+            const endStr = b.policyDetail?.polEndDate || b.benefWETo;
+            if (!endStr) return true;
+            const endDate = this.parseDate(endStr);
+            return !endDate || endDate >= today;
+          });
+
+          // 5. Optional plan filter (matching legacy portal planType check)
+          // CRITICAL: Must execute AFTER v3 FetchMemberPolicyDetails enrichment because v3 sets b.benefPlanType
+          if (dto.plan?.trim() && dto.plan.trim() !== '0' && !dto.plan.toLowerCase().includes('select plan')) {
+            const planNorm = dto.plan.trim().toLowerCase();
+            rawList = rawList.filter((b: any) =>
+              (b.benefPlanType && b.benefPlanType.toLowerCase().includes(planNorm)) ||
+              (b.primaryBenefDetails?.priBenefGrade && b.primaryBenefDetails.priBenefGrade.toLowerCase().includes(planNorm))
+            );
+          }
+
           const members: ClientDetailsMember[] = rawList.map((b: any) => {
             const first = (b.benefName || '').trim();
             const last = (b.benefLastName || '').trim();
             const fullName = [first, last].filter(Boolean).join(' ').trim() || 'Insured Member';
-            const staffId = b.primaryBenefDetails?.actualEmpCode || b.actualEmpCode || b.priBenefEmpCode || '';
+            const staffId = b.actualEmpCode || b.primaryBenefDetails?.actualEmpCode || b.priBenefEmpCode || '';
             const pih = b.benefNIAPersonID || b.insurerBenefNumber || '';
             const rel = b.benefRelName?.toLowerCase() === 'self' ? 'Insured' : (b.benefRelName || 'Insured');
-            const origDate = this.parseDateStr(b.benefInceptionDate || b.benefPolincdate || b.benefWEF);
-            const sDate = this.parseDateStr(b.policyDetail?.polStartDate || b.benefWEF);
-            const eDate = this.parseDateStr(b.policyDetail?.polEndDate || b.benefWETo);
+            const origDate = b.benefInceptionDate ? this.parseDateStr(b.benefInceptionDate) : '-';
+            const sDate = this.parseDateStr(b.policyDetail?.polStartDate || b.benefWEF, true);
+            const eDate = this.parseDateStr(b.policyDetail?.polEndDate || b.benefWETo, true);
             const isActive = b.benefActive !== false;
 
             return {
@@ -1987,6 +2180,7 @@ export class BrokerService {
           });
 
           const totalCount = members.length;
+          const paginatedMembers = members.slice(offset, offset + limit);
 
           this.logger.log(`Client Details search via Claim API v2 found ${totalCount} records in ${Date.now() - startedAt}ms`, BrokerService.name, {
             tenantId: trimmedTenantId,
@@ -2001,7 +2195,7 @@ export class BrokerService {
             total: totalCount,
             page,
             limit,
-            members,
+            members: paginatedMembers,
           };
         }
       } catch (apiErr: any) {
@@ -2100,7 +2294,7 @@ export class BrokerService {
           .join(' ')
           .trim() || 'Insured Member';
 
-        const origDate = this.parseDateStr(r.original_entry_date || r.effective_date);
+        const origDate = r.original_entry_date ? this.parseDateStr(r.original_entry_date) : '-';
         const sDate = this.parseDateStr(r.effective_date);
         const eDate = this.parseDateStr(r.expiry_date);
         const activeBool = r.is_active === true || r.is_active === 1 || String(r.policy_status).toLowerCase() === 'active';
@@ -2180,73 +2374,115 @@ export class BrokerService {
     let beneficiaries: any[] = [];
     let beneficiaryData: Record<string, any> | null = null;
 
+    const numericMaid = Number(maid);
+    const isValidNumericMaid = !isNaN(numericMaid) && numericMaid > 0;
+
     // 1. Fetch Policy & Beneficiaries via Claim API v1 & v2 (matching legacy portal)
-    try {
-      const [v1Res, famRes] = await Promise.all([
-        fetch(`${v1Url.replace(/\/+$/, '')}/memberportal/search/policybenef/${encodeURIComponent(maid)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ PrimaryMAID: Number(maid) }),
-        }),
-        fetch(`${v2Url.replace(/\/+$/, '')}/api/v2/BeneficiaryFamily/`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-CA-SHARED-KEY': v2Key,
-            'Payer': trimmedTenantId,
-          },
-          body: JSON.stringify({ beneficiaryMediAssistId: Number(maid), dbType: 'MA' }),
-        }),
-      ]);
+    if (isValidNumericMaid) {
+      try {
+        const [v1Res, famRes] = await Promise.all([
+          fetch(`${v1Url.replace(/\/+$/, '')}/memberportal/search/policybenef/${encodeURIComponent(maid)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ PrimaryMAID: numericMaid }),
+          }),
+          fetch(`${v2Url.replace(/\/+$/, '')}/api/v2/BeneficiaryFamily/`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CA-SHARED-KEY': v2Key,
+              'Payer': trimmedTenantId,
+            },
+            body: JSON.stringify({ beneficiaryMediAssistId: numericMaid, dbType: 'MA' }),
+          }),
+        ]);
 
-      if (v1Res.ok) {
-        const v1Data = await v1Res.json();
-        const famData = famRes.ok ? await famRes.json() : null;
+        if (v1Res.ok) {
+          const v1Data = await v1Res.json();
+          const famData = famRes.ok ? await famRes.json() : null;
 
-        const policyDoc = v1Data.policyBenefDetails?.[0]?.policyDetails || {};
-        const famList = famData?.beneficiaryDetails || [];
+          const policyDoc = v1Data.policyBenefDetails?.[0]?.policyDetails || {};
+          const famList = famData?.beneficiaryDetails || [];
 
-        policyInfo = {
-          category: policyDoc.pol_CategoryName || '',
-          insuranceCompany: policyDoc.insuranceCompany || '',
-          policyNumber: policyDoc.policyNumber || '',
-          validityPeriod: `${this.parseDateStr(policyDoc.startDate)} To ${this.parseDateStr(policyDoc.endDate)}`,
-          planType: policyDoc.policyType === 'Group' ? 'Long Term Plan' : (policyDoc.policyType || ''),
-          planName: famList[0]?.benefPlanType || famList[0]?.primaryBenefDetails?.priBenefGrade || v1Data.policyBenefDetails?.[0]?.beneficiaryDetails?.[0]?.benefPlanType || '',
-          policyId: policyDoc.policyId,
-          insurerId: policyDoc.insurerId,
-        };
+          // Fetch policy-level eCard and COI configuration via Claim API v3 (exact legacy portal HRHomeController/BrokerHomeController logic)
+          let showEcard = false;
+          let showCOI = false;
+          const v3Url = tenantConfig.config?.claimApis?.v3;
+          if (policyDoc.policyId && v3Url) {
+            try {
+              const pRes = await fetch(`${v3Url.replace(/\/+$/, '')}/FetchPolicyDetails`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-CA-SHARED-KEY': v2Key,
+                  'Payer': trimmedTenantId,
+                },
+                body: JSON.stringify({ policyId: policyDoc.policyId }),
+              });
+              if (pRes.ok) {
+                const pData = await pRes.json();
+                const extra = pData?.extraDetails;
+                const isHR = user.activePortal === 'hr' || Boolean(user.roles?.isCorpHR);
+                const eCardTag = isHR ? 'ShowECardForHR' : 'ShowECardForBroker';
+                const coiTag = isHR ? 'ShowCOIForHR' : 'ShowCOIForBroker';
 
-        const rawBenefs = v1Data.policyBenefDetails?.[0]?.beneficiaryDetails || [];
-        beneficiaries = rawBenefs.map((b: any) => {
-          const fam = famList.find((f: any) => Number(f.benefMediAssistID) === Number(b.mediAssistID)) || {};
-          const first = (fam.benefName || b.name || '').trim();
-          const last = (fam.benefLastName || b.lastName || '').trim();
-          const fullName = [first, last].filter(Boolean).join(' ').trim() || first;
-          const rel = fam.benefRelName?.toLowerCase() === 'self' ? 'Insured' : (fam.benefRelName || b.relation || '');
-          const pih = fam.benefNIAPersonID || b.pihNumber || '';
-          const staffId = fam.primaryBenefDetails?.actualEmpCode || b.actualEmpCode || b.priBenefEmpCode || '';
-          const isActive = fam.benefActive !== false;
+                showEcard = Array.isArray(extra?.eCardConfig) &&
+                  extra.eCardConfig.some((c: any) => c.tagName?.trim() === eCardTag && String(c.tagValue)?.trim() === '1');
 
-          return {
-            maid: String(b.mediAssistID),
-            name: fullName,
-            relation: rel,
-            pihNumber: pih,
-            staffId,
-            status: isActive ? 'Active Current' : 'Inactive',
-            isActive,
+                showCOI = Array.isArray(extra?.coiConfig) &&
+                  extra.coiConfig.some((c: any) => c.tagName?.trim() === coiTag && String(c.tagValue)?.trim() === '1');
+              }
+            } catch (pErr: any) {
+              this.logger.warn(`Failed fetching policy config from /FetchPolicyDetails: ${pErr.message}`, BrokerService.name, { policyId: policyDoc.policyId });
+            }
+          }
+
+          policyInfo = {
+            category: policyDoc.pol_CategoryName || '',
+            insuranceCompany: policyDoc.insuranceCompany || '',
+            policyNumber: policyDoc.policyNumber || '',
+            validityPeriod: `${this.parseDateStr(policyDoc.startDate)} To ${this.parseDateStr(policyDoc.endDate)}`,
+            planType: policyDoc.policyType === 'Group' ? 'Long Term Plan' : (policyDoc.policyType || ''),
+            planName: famList[0]?.benefPlanType || famList[0]?.primaryBenefDetails?.priBenefGrade || v1Data.policyBenefDetails?.[0]?.beneficiaryDetails?.[0]?.benefPlanType || '',
             policyId: policyDoc.policyId,
             insurerId: policyDoc.insurerId,
-            benefPriId: b.priBenefId || fam.benefPriID || 0,
-            benefUserId: b.benefUserID || fam.benefUserID || 0,
-            polId: policyDoc.policyId || b.priBenefPolID || fam.benefPolID || 0,
-            corporateId: policyDoc.corporateId || 0,
+            showEcard,
+            showCOI,
           };
-        });
+
+          const rawBenefs = v1Data.policyBenefDetails?.[0]?.beneficiaryDetails || [];
+          beneficiaries = rawBenefs.map((b: any) => {
+            const rawId = b.mediAssistID ?? b.MediAssistID ?? b.mediAssistId;
+            const fam = famList.find((f: any) => Number(f.benefMediAssistID) === Number(rawId)) || {};
+            const first = (fam.benefName || b.name || '').trim();
+            const last = (fam.benefLastName || b.lastName || '').trim();
+            const fullName = [first, last].filter(Boolean).join(' ').trim() || first;
+            const rel = fam.benefRelName?.toLowerCase() === 'self' ? 'Insured' : (fam.benefRelName || b.relation || '');
+            const pih = fam.benefNIAPersonID || b.pihNumber || '';
+            const staffId = fam.primaryBenefDetails?.actualEmpCode || b.actualEmpCode || b.priBenefEmpCode || '';
+            const isActive = fam.benefActive !== false;
+            const resolvedMaid = String(rawId ?? fam.benefMediAssistID ?? fam.beneficiaryMediAssistId ?? maid);
+
+            return {
+              maid: resolvedMaid,
+              name: fullName,
+              relation: rel,
+              pihNumber: pih,
+              staffId,
+              status: isActive ? 'Active Current' : 'Inactive',
+              isActive,
+              policyId: policyDoc.policyId,
+              insurerId: policyDoc.insurerId,
+              benefPriId: b.priBenefId || fam.benefPriID || 0,
+              benefUserId: b.benefUserID || fam.benefUserID || 0,
+              polId: policyDoc.policyId || b.priBenefPolID || fam.benefPolID || 0,
+              corporateId: policyDoc.corporateId || 0,
+            };
+          });
+        }
+      } catch (apiErr: any) {
+        this.logger.warn(`Failed fetching policy/family from Claim APIs: ${apiErr.message}`, BrokerService.name, { maid });
       }
-    } catch (apiErr: any) {
-      this.logger.warn(`Failed fetching policy/family from Claim APIs: ${apiErr.message}`, BrokerService.name, { maid });
     }
 
     // 2. Fetch edit details from Lawton DX API
@@ -2288,6 +2524,8 @@ export class BrokerService {
       isSuccess: true,
       data: beneficiaryData || undefined,
       policy: policyInfo || undefined,
+      showEcard: policyInfo?.showEcard ?? false,
+      showCOI: policyInfo?.showCOI ?? false,
       beneficiaries,
       dependents: beneficiaries,
     };
@@ -2431,6 +2669,13 @@ export class BrokerService {
     const ecardUrl = tenantConfig.config?.services?.ecard || 'https://uat-lawton-core-ecard.lawtonasia.com';
     const payerKey = tenantConfig.config?.claimApis?.pairKey || trimmedTenantId;
     const v2Key = tenantConfig.config?.claimApis?.v2Key || '123412341234';
+
+    if (!dto.polid || !dto.maid) {
+      return {
+        isSuccess: false,
+        message: 'E-Card data not available for this member.',
+      };
+    }
 
     const payload = {
       printRequest: {
@@ -2585,11 +2830,13 @@ export class BrokerService {
       }
     }
 
-    // Fallbacks if still unset
-    if (!resolvedBenefPriId) resolvedBenefPriId = 18706;
-    if (!resolvedBenefUserId) resolvedBenefUserId = 22645;
-    if (!resolvedPolId) resolvedPolId = 412855;
-    if (!resolvedInsurerId) resolvedInsurerId = 3065;
+    // Zero artificial fallbacks: reject if required identifiers cannot be resolved
+    if (!resolvedBenefPriId || !resolvedPolId) {
+      return {
+        isSuccess: false,
+        message: 'Certificate of Insurance data not available for this member.',
+      };
+    }
 
     const buildPayload = (dbType: string) => ({
       PribenefId: resolvedBenefPriId,

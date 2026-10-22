@@ -446,13 +446,13 @@ export class PolicyService {
     const documents: PolicyDocumentItem[] = [
       {
         documentId: 'claim_form_standard',
-        fileName: 'PIH Claim Form (PDF)',
-        downloadUrl: '/resources/documents/PIHClaimForm.pdf',
+        fileName: 'Claim Form',
+        downloadUrl: '/Resources/Documents/PIHClaimForm.pdf',
         documentType: 'claim_form',
       },
       {
         documentId: 'network_hospital_directory',
-        fileName: 'Network Hospital Directory',
+        fileName: 'Network Hospital',
         downloadUrl: '/dashboard?view=search-medical-provider',
         documentType: 'network_hospital',
       },
@@ -479,13 +479,27 @@ export class PolicyService {
 
         const attachments = response?.Attachments || response?.attachments || [];
         for (const att of attachments) {
-          const rawUrl = att.DMSFilePath || att.dmsFilePath || att.DownloadUrl || '';
-          if (!rawUrl) continue;
+          const fileGuid =
+            att.dmsFilePath ||
+            att.DMSFilePath ||
+            att.fileGuid ||
+            att.FileGuid ||
+            '';
+          if (!fileGuid) continue;
+
+          const fileName =
+            att.fileDisplayName ||
+            att.FileDisplayName ||
+            att.fileName ||
+            att.FileName ||
+            att.fileOriginalName ||
+            att.FileOriginalName ||
+            'Policy Document.pdf';
 
           documents.push({
-            documentId: att.AttachmentID || att.attachmentId || att.Id,
-            fileName: att.FileDisplayName || att.FileName || 'Policy Attachment',
-            downloadUrl: rawUrl,
+            documentId: att.attachmentID || att.AttachmentID || att.attachmentId || att.Id || fileGuid,
+            fileName,
+            downloadUrl: `/api/policy/attachment/${encodeURIComponent(fileGuid)}?fileName=${encodeURIComponent(fileName)}`,
             documentType: 'policy_attachment',
             isExternal: true,
           });
@@ -502,6 +516,74 @@ export class PolicyService {
       success: true,
       documents,
     };
+  }
+
+  /**
+   * Downloads a policy document attachment from central DMS by its fileGuid / FileIdentifier.
+   */
+  async downloadDmsAttachment(
+    tenantId: string,
+    fileGuid: string,
+    fallbackFileName?: string,
+  ): Promise<{ buffer: Buffer; contentType: string; fileName: string }> {
+    const isLawton =
+      tenantId.includes('Lawton') ||
+      tenantId === 'MzAyNHxMYXd0b25Bc2lhIzIwMjZATWF5';
+
+    let dmsHost = isLawton
+      ? 'https://uat-lawton-dms.lawtonasia.com'
+      : 'http://coredms.medibuddy.in';
+
+    let appId = isLawton ? '9240' : '9237';
+    let appUrl = isLawton
+      ? 'https://uat-maglobal.lawtonasia.com/'
+      : 'https://maglobal.mayfairwecare.in/';
+
+    try {
+      const tenantConfig = await this.tenantService.getFullTenantById(tenantId.trim());
+      if (tenantConfig?.config?.auth?.appId) {
+        appId = String(tenantConfig.config.auth.appId);
+      }
+      if (tenantConfig?.config?.app?.url) {
+        appUrl = tenantConfig.config.app.url.replace(/\/?$/, '/');
+      }
+    } catch {
+      // Use defaults
+    }
+
+    const res = await fetch(`${dmsHost}/DownloadFile`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        mbappid: appId,
+        mbappurl: appUrl,
+      },
+      body: JSON.stringify({ FileIdentifier: fileGuid }),
+    });
+
+    if (!res.ok) {
+      throw new InternalServerErrorException(`DMS failed to download file ${fileGuid}: status ${res.status}`);
+    }
+
+    const data = (await res.json()) as any;
+    if (!data?.fileBytes) {
+      throw new InternalServerErrorException(`No file content returned from DMS for fileGuid: ${fileGuid}`);
+    }
+
+    const buffer = Buffer.from(data.fileBytes, 'base64');
+    const resolvedFileName = data.fileName || fallbackFileName || 'document.pdf';
+    const ext = resolvedFileName.split('.').pop()?.toLowerCase();
+
+    let contentType = 'application/pdf';
+    if (ext === 'png') contentType = 'image/png';
+    else if (ext === 'jpg' || ext === 'jpeg') contentType = 'image/jpeg';
+    else if (ext === 'gif') contentType = 'image/gif';
+    else if (ext === 'docx') contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    else if (ext === 'doc') contentType = 'application/msword';
+    else if (ext === 'xlsx') contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    else if (ext === 'xls') contentType = 'application/vnd.ms-excel';
+
+    return { buffer, contentType, fileName: resolvedFileName };
   }
 
   /**

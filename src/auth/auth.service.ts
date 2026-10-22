@@ -54,7 +54,10 @@ export class AuthService {
 
     const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(tenantId.trim());
 
-    const authUrl = tenantConfig.config.auth.api?.replace(/\/+$/, '');
+    let authUrl = tenantConfig.config.auth.api?.replace(/\/+$/, '');
+    if (authUrl && authUrl.includes('lawtonasia') && !authUrl.includes('lawtonasia.com')) {
+      authUrl = authUrl.replace('lawtonasia', 'lawtonasia.com');
+    }
     const appId = String(tenantConfig.config.auth.appId);
 
     if (!authUrl) {

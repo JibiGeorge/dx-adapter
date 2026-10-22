@@ -79,12 +79,38 @@ export class ProviderService {
         TPA: tpaName,
       };
 
-      const response = await this.httpService.post<any[]>(endpoint, payload, {
-        headers: { 'Content-Type': 'application/json' },
-        timeoutMs: 12_000,
-      });
+      // Perform upstream call with up to 3 resilient retries
+      let response: any[] | null = null;
+      let lastError: any = null;
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          response = await this.httpService.post<any[]>(endpoint, payload, {
+            headers: {
+              'Content-Type': 'application/json',
+              'User-Agent': 'CrossLink-Enterprise-Portal/1.0 (health@lawtonasia.com)',
+            },
+            timeoutMs: 20_000,
+          });
+          if (Array.isArray(response)) {
+            break;
+          }
+        } catch (err: any) {
+          lastError = err;
+          this.logger.warn(
+            `Medical provider upstream search attempt ${attempt}/3 failed: ${err.message}`,
+            ProviderService.name,
+          );
+          if (attempt < 3) {
+            await new Promise((resolve) => setTimeout(resolve, 600 * attempt));
+          }
+        }
+      }
 
       if (!Array.isArray(response)) {
+        if (lastError) {
+          throw lastError;
+        }
         return {
           isSuccess: true,
           total: 0,
@@ -93,27 +119,29 @@ export class ProviderService {
         };
       }
 
-      // Map and enrich with calculated distance
-      let items: MedicalProviderItem[] = response.map((item: any) => {
-        const itemLat = Number(item.latitude || item.lat || 0);
-        const itemLon = Number(item.longitude || item.long || item.lon || 0);
-        const dist =
-          itemLat && itemLon
-            ? calculateHaversineDistance(lat, lon, itemLat, itemLon)
-            : undefined;
+      // Map and enrich with calculated distance (defensively handling any malformed upstream objects)
+      let items: MedicalProviderItem[] = response
+        .filter((item: any) => item && typeof item === 'object')
+        .map((item: any) => {
+          const itemLat = Number(item.latitude || item.lat || 0);
+          const itemLon = Number(item.longitude || item.long || item.lon || 0);
+          const dist =
+            itemLat && itemLon
+              ? calculateHaversineDistance(lat, lon, itemLat, itemLon)
+              : undefined;
 
-        return {
-          id: Number(item.id || item.hospitalId || 0),
-          typeOfService: String(item.typeOfService || 'Hospital').trim(),
-          networkPartner: String(item.networkPartner || tpaName).trim(),
-          name: String(item.name || item.hospitalName || '').trim(),
-          address: String(item.address || '').trim(),
-          formattedAddress: String(item.formattedAddress || item.address || '').trim(),
-          latitude: itemLat,
-          longitude: itemLon,
-          distanceKm: dist,
-        };
-      });
+          return {
+            id: Number(item.id || item.hospitalId || 0),
+            typeOfService: String(item.typeOfService || 'Hospital').trim(),
+            networkPartner: String(item.networkPartner || tpaName).trim(),
+            name: String(item.name || item.hospitalName || '').trim(),
+            address: String(item.address || '').trim(),
+            formattedAddress: String(item.formattedAddress || item.address || '').trim(),
+            latitude: itemLat,
+            longitude: itemLon,
+            distanceKm: dist,
+          };
+        });
 
       // Filter by type of service if requested
       if (dto.typeOfService && dto.typeOfService.toLowerCase() !== 'all') {

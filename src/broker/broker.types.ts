@@ -185,6 +185,8 @@ export interface ClientDetailsPolicyInfo {
   planName: string;
   policyId?: number;
   insurerId?: number;
+  showEcard?: boolean;
+  showCOI?: boolean;
 }
 
 export interface ClientDetailsBeneficiaryItem {
@@ -205,5 +207,7 @@ export interface ClientDetailsBeneficiaryResponse {
   policy?: ClientDetailsPolicyInfo;
   beneficiaries?: ClientDetailsBeneficiaryItem[];
   dependents?: ClientDetailsMember[];
+  showEcard?: boolean;
+  showCOI?: boolean;
   message?: string;
 }
