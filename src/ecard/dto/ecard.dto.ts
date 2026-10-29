@@ -30,7 +30,7 @@ export class SearchEcardDto {
 
   @IsOptional()
   @IsString()
-  docType?: 'ecard' | 'coi' | 'both';
+  docType?: string;
 
   @IsOptional()
   @Type(() => Number)

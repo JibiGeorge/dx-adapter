@@ -50,10 +50,11 @@ export interface BrokerDashboardOption {
 export interface ClaimDateResponse {
   isSuccess: boolean;
   error?: string;
+  beneficiaries?: Beneficiaries[];
   benbeneficiaries?: Beneficiaries[];
   empCode?: string;
   providerCorpId?: number;
-  polId?: number
+  polId?: number;
 }
 
 export interface Beneficiaries {

@@ -181,6 +181,8 @@ export interface UserSessionPayload {
   departmentId: string;
   brokerId?: string;
   isAdminBroker?: boolean;
+  isMandateBroker?: boolean;
+  allowedTPAIds?: string;
   roles: UserSessionRoles;
 }
 

@@ -272,17 +272,20 @@ export class AuthService {
       (providerCorpId > 0 || providerGroupCorpId > 0) &&
       firstRoleName === 'HRPREEMPLOYMENT';
 
+    const mandateBrokerId = this.getProp(
+      propertyData,
+      'tpa_mandatebroker_id',
+    );
+
     const isAdminBroker =
       isBroker &&
       (
         firstRoleName === 'ADMIN' ||
-        Boolean(
-          this.getProp(
-            propertyData,
-            'tpa_mandatebroker_id',
-          ),
-        )
+        Boolean(mandateBrokerId)
       );
+
+    const isMandateBroker = isBroker && Boolean(mandateBrokerId);
+    const allowedTPAIdsProp = this.getProp(propertyData, 'allowed_tpa_ids');
 
     // Validate role against requested role from header ('broker' or 'hr')
     if (requestedRole?.trim()) {
@@ -442,6 +445,12 @@ export class AuthService {
         : undefined,
       isAdminBroker: isBroker
         ? isAdminBroker
+        : undefined,
+      isMandateBroker: isBroker
+        ? isMandateBroker
+        : undefined,
+      allowedTPAIds: isBroker && allowedTPAIdsProp
+        ? String(allowedTPAIdsProp)
         : undefined,
       roles: {
         isAgent,

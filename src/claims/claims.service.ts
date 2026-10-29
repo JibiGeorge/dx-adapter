@@ -124,10 +124,20 @@ export class ClaimsService {
     dto: ClaimSearchDto,
     tenantConfig: any,
   ): Promise<{ isSuccess: boolean; total: number; claims: NormalizedClaim[]; message?: string }> {
+    const trimmedTenantId = (tenantId || '').trim();
     const dxUrl =
       tenantConfig.config?.dataexchange?.api ||
-      tenantConfig.config?.claimApis?.v1Lawton ||
-      'https://uat-lawton-dx.lawtonasia.com';
+      tenantConfig.config?.claimApis?.v1Lawton;
+
+    if (!dxUrl) {
+      this.logger.error(`Missing dataexchange.api in TenantConfiguration for tenant ${trimmedTenantId}`);
+      return {
+        isSuccess: false,
+        total: 0,
+        claims: [],
+        message: 'Data exchange gateway configuration is missing in TenantConfiguration.',
+      };
+    }
 
     const normalizedClaims: NormalizedClaim[] = [];
 
@@ -178,8 +188,18 @@ export class ClaimsService {
     // 2. Exact Legacy Lawton Pipeline: BeneficiarySearch MAIDs -> Non-CMS Claim Search on Lawton DX
     if (dto.corpId || dto.empName?.trim() || dto.empCode?.trim()) {
       try {
-        const v2Url = tenantConfig.config?.claimApis?.v2?.replace(/\/+$/, '') || 'https://uat-lawton-claimapi-v2.lawtonasia.com';
-        const v2Key = tenantConfig.config?.claimApis?.v2Key || '123412341234';
+        const v2Url = tenantConfig.config?.claimApis?.v2?.replace(/\/+$/, '');
+        const v2Key = tenantConfig.config?.claimApis?.v2Key;
+
+        if (!v2Url || !v2Key) {
+          this.logger.error(`Missing claimApis.v2 or v2Key in TenantConfiguration for tenant ${trimmedTenantId}`);
+          return {
+            isSuccess: false,
+            total: 0,
+            claims: [],
+            message: 'Claim API v2 configuration is missing in TenantConfiguration.',
+          };
+        }
 
         const benefPayload: Record<string, any> = {
           Range: 100,
@@ -310,20 +330,11 @@ export class ClaimsService {
       }
     }
 
-    // 3. Fallback: Query Claim API v2 (Centralized CMS claims)
-    const v2Claims = await this.queryClaimApiV2(tenantId, tenantConfig, dto);
-    if (v2Claims.length > 0) {
-      return {
-        isSuccess: true,
-        total: v2Claims.length,
-        claims: v2Claims,
-      };
-    }
-
     return {
       isSuccess: true,
       total: 0,
       claims: [],
+      message: 'No claims found matching your query criteria.',
     };
   }
 
@@ -476,8 +487,16 @@ export class ClaimsService {
     const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
     const dxUrl =
       tenantConfig.config?.dataexchange?.api ||
-      tenantConfig.config?.claimApis?.v1Lawton ||
-      'https://uat-lawton-dx.lawtonasia.com';
+      tenantConfig.config?.claimApis?.v1Lawton;
+
+    if (!dxUrl) {
+      this.logger.error(`Missing dataexchange.api in TenantConfiguration for tenant ${trimmedTenantId}`);
+      return {
+        isSuccess: false,
+        details: null,
+        message: 'Data exchange gateway configuration is missing in TenantConfiguration.',
+      };
+    }
 
     try {
       // 1. Try DX claimDetails

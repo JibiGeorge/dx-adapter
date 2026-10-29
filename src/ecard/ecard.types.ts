@@ -15,6 +15,7 @@ export interface EcardMember {
   insurerId?: number;
   priBenefId?: number;
   benefUserId?: number;
+  isDocumentAvailable?: boolean;
   isEcardAvailable?: boolean;
   isCoiAvailable?: boolean;
 }

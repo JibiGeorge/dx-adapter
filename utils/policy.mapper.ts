@@ -2,6 +2,7 @@ export interface BrokerPolicy {
   polId: number;
   polNo: string;
   planName: string;
+  planType?: string;
   polHolderName: string;
   startDate: unknown;
   endDate: unknown;
@@ -56,8 +57,16 @@ export function mapAgentPolicies(
       firstDefined(
         p.PlanName,
         p.planName,
+        '',
+      ),
+    ),
+    planType: toString(
+      firstDefined(
+        p.PlanType,
+        p.planType,
         p.PolicyType,
         p.policyType,
+        '',
       ),
     ),
     polHolderName: toString(

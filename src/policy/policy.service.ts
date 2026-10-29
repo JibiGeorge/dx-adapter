@@ -113,9 +113,9 @@ export class PolicyService {
         policiesMap.set(key, {
           policyId: polId,
           policyNumber: rawPolNo,
-          planName: p.planName || p.policyHolderName || 'Comprehensive Health Plan',
+          planName: p.planName || '',
           planType: p.planType || 'Corporate Group',
-          policyHolderName: p.polHolderName || p.policyHolderName || 'Corporate Client',
+          policyHolderName: p.polHolderName || p.policyHolderName || '',
           startDate: this.formatDate(sDate),
           endDate: this.formatDate(eDate),
           startDateMs: sDate ? sDate.getTime() : undefined,
@@ -341,8 +341,11 @@ export class PolicyService {
       Range: Math.max(1, Math.min(100, range)),
       StartIndex: Math.max(0, startIndex),
     };
-    if (policyId && policyId > 0) payload.PolicyIds = [Number(policyId)];
-    if (corpId && corpId > 0) payload.PolicyCorpIds = [Number(corpId)];
+    if (policyId && policyId > 0) {
+      payload.PolicyIds = [Number(policyId)];
+    } else if (corpId && corpId > 0) {
+      payload.PolicyCorpIds = [Number(corpId)];
+    }
 
     try {
       const response = await this.httpService.post<any>(
@@ -479,6 +482,17 @@ export class PolicyService {
 
         const attachments = response?.Attachments || response?.attachments || [];
         for (const att of attachments) {
+          // Legacy parity: Filter to POLICY_DOCUMENT_ATTACHMENT (enum value 1)
+          const attType = att.attachmentType ?? att.AttachmentType;
+          if (
+            attType !== undefined &&
+            attType !== null &&
+            attType !== 1 &&
+            String(attType).toLowerCase() !== 'policy_document_attachment'
+          ) {
+            continue;
+          }
+
           const fileGuid =
             att.dmsFilePath ||
             att.DMSFilePath ||
@@ -619,7 +633,8 @@ export class PolicyService {
           dbType: 'MA',
         };
         if (req.startDateMs) {
-          payload.policyStartDate = `/Date(${req.startDateMs})/`;
+          const sec = req.startDateMs > 10000000000 ? Math.floor(req.startDateMs / 1000) : req.startDateMs;
+          payload.policyStartDate = `/Date(${sec})/`;
         }
 
         const response = await this.httpService.post<any>(

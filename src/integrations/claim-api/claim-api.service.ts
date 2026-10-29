@@ -12,22 +12,30 @@ export class ClaimApiService {
 
   async searchPoliciesByAgent(
     brokerId: string | number,
-    allowedTPAIds: number[],
+    allowedTPAIds: number[] | string,
     baseUrl: string,
+    isMandateBroker: boolean = false,
   ): Promise<AgentPolicySearchResponse> {
     const cleanUrl = baseUrl.replace(/\/+$/, '');
     const endpoint = `${cleanUrl}/policy/search/agentcode`;
 
+    const isMandate = Boolean(isMandateBroker);
+    const resolvedBrokerId = isMandate ? '0' : String(brokerId);
+    const mandateBrokerName = isMandate ? String(brokerId) : null;
+    const formattedAllowedTpaIds = Array.isArray(allowedTPAIds)
+      ? allowedTPAIds.join(',')
+      : String(allowedTPAIds || '');
+
     this.logger.debug(
-      `Searching policies by agent for brokerId: ${brokerId}`,
+      `Searching policies by agent for brokerId: ${brokerId} (mandate: ${isMandate})`,
       ClaimApiService.name,
-      { brokerId, allowedTPAIds, endpoint },
+      { brokerId, isMandate, formattedAllowedTpaIds, endpoint },
     );
 
     const payload = {
-      BrokerId: brokerId,
-      MandateBrokerName: null,
-      AllowedTPAIds: allowedTPAIds,
+      BrokerId: resolvedBrokerId,
+      MandateBrokerName: mandateBrokerName,
+      AllowedTPAIds: formattedAllowedTpaIds,
     };
 
     const response = await this.httpService.post<AgentPolicySearchResponse>(endpoint, payload);

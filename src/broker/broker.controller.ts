@@ -105,6 +105,34 @@ export class BrokerController {
     };
   }
 
+  @Get('claim-submission/search-policies')
+  async searchPoliciesForClaim(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+    @Query('corpId') corpId?: string,
+    @Query('polId') polId?: string,
+    @Query('empCode') empCode?: string,
+    @Query('pihNumber') pihNumber?: string,
+  ): Promise<any> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+
+    return this.brokerService.searchPoliciesForClaim(tenantId, user, { corpId, polId, empCode, pihNumber });
+  }
+
+  @Get('bill-types')
+  async getBillTypes(
+    @Headers('x-tenant-id') tenantId: string,
+    @CurrentUser() user: UserSessionPayload,
+  ): Promise<any> {
+    if (!tenantId?.trim()) {
+      throw new BadRequestException('x-tenant-id header is required');
+    }
+
+    return this.brokerService.getBillTypes();
+  }
+
   @All(['bank-accounts', 'bank-accounts/:entityId'])
   async getBankAccounts(
     @Headers('x-tenant-id') tenantId: string,

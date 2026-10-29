@@ -263,8 +263,13 @@ export class BrokerService {
         );
       }
 
-      // First attempt: agent-level policy search.
-      const allowedTPAIds = isLawton ? LAWTON_TPA_IDS : [];
+      // Allowed TPA IDs: either from user session or tenant default
+      const allowedTPAIds = user.allowedTPAIds
+        ? user.allowedTPAIds.split(',').map((x) => Number(x.trim())).filter((n) => !isNaN(n))
+        : isLawton
+        ? LAWTON_TPA_IDS
+        : [];
+      const isMandateBroker = Boolean(user.isMandateBroker);
 
       const agentSearchStartedAt = Date.now();
 
@@ -273,6 +278,7 @@ export class BrokerService {
           brokerId,
           allowedTPAIds,
           claimApiUrl,
+          isMandateBroker,
         );
 
       const agentPolicies =
@@ -349,30 +355,9 @@ export class BrokerService {
         );
       }
 
-      // Preserve the existing fallback expiry rule.
-      const today = new Date();
-
-      const activePolicies = fallbackItems.filter((policy) => {
-        const rawEndDate =
-          policy.polEndDate ??
-          policy.PolEndDate ??
-          policy.endDate ??
-          policy.EndDate;
-
-        if (!rawEndDate) {
-          return true;
-        }
-
-        const expiryDate = parseDotNetDate(rawEndDate);
-
-        return (
-          expiryDate instanceof Date &&
-          !Number.isNaN(expiryDate.getTime()) &&
-          expiryDate >= today
-        );
-      });
-
-      const policies = mapFallbackPolicies(activePolicies);
+      // In legacy, Policy List displays ALL policies (Active, Expired, Future) for the broker dashboard.
+      // Do not prematurely filter out expired policies in fallback.
+      const policies = mapFallbackPolicies(fallbackItems);
 
       this.logger.log(
         'Corporate fallback policy search completed',
@@ -381,7 +366,6 @@ export class BrokerService {
           ...context,
           corporateCount: corpIds.length,
           receivedCount: fallbackItems.length,
-          activeCount: activePolicies.length,
           policyCount: policies.length,
           durationMs: Date.now() - fallbackStartedAt,
         },
@@ -450,12 +434,35 @@ export class BrokerService {
       const tenantConfig: TenantConfigTypes = await this.tenantService.getFullTenantById(trimmedTenantId);
       let beneficiaries: Beneficiaries[] = [];
 
-      // Step 1: Attempt to fetch beneficiary family from Claim API
-      if (numMaid > 0) {
+      // Step 1: Query full list of beneficiaries by policy / employee from v2 BeneficiarySearch API
+      if (parsedPolId || parsedCorpId || resolvedEmpCode || pihNumber) {
+        beneficiaries = await this.searchBeneficiariesFromApi(
+          parsedCorpId,
+          parsedPolId,
+          resolvedEmpCode,
+          pihNumber,
+          tenantConfig,
+          trimmedTenantId,
+        );
+      }
+
+      // Step 2: Fallback to SQL Server query for policy / employee beneficiaries
+      if (beneficiaries.length === 0 && (parsedPolId || resolvedEmpCode || pihNumber)) {
+        beneficiaries = await this.searchBeneficiariesFromDb(
+          parsedCorpId,
+          parsedPolId,
+          resolvedEmpCode,
+          pihNumber,
+          tenantConfig,
+        );
+      }
+
+      // Step 3: Attempt to fetch beneficiary family from Claim API v1
+      if (beneficiaries.length === 0 && numMaid > 0) {
         beneficiaries = await this.fetchBeneficiaryFamilyFromApi(numMaid, tenantConfig, trimmedTenantId);
       }
 
-      // Step 2: Fallback to SQL Server query if API returned no family members
+      // Step 4: Fallback to single primary beneficiary resolution
       if (beneficiaries.length === 0) {
         this.logger.log(
           'Beneficiaries empty after API fetch; falling back to primary beneficiary resolution',
@@ -486,6 +493,7 @@ export class BrokerService {
 
       return {
         isSuccess: true,
+        beneficiaries: beneficiaries,
         benbeneficiaries: beneficiaries,
         empCode: resolvedEmpCode,
         providerCorpId: parsedCorpId,
@@ -558,6 +566,126 @@ export class BrokerService {
       );
       return [];
     }
+  }
+
+  /**
+   * Searches all matching enrolled beneficiaries for a policy / employee from v2 BeneficiarySearch API.
+   */
+  private async searchBeneficiariesFromApi(
+    corpId: number | undefined,
+    polId: number | undefined,
+    empCode: string,
+    pihNumber: string | undefined,
+    tenantConfig: TenantConfigTypes,
+    trimmedTenantId: string,
+  ): Promise<Beneficiaries[]> {
+    const v2Url = tenantConfig.config?.claimApis?.v2?.replace(/\/+$/, '');
+    const v2Key = tenantConfig.config?.claimApis?.v2Key || '123412341234';
+    if (!v2Url) return [];
+
+    try {
+      const payload: Record<string, any> = {
+        PolicyCorpIds: corpId && corpId > 0 ? [corpId] : null,
+        PolicyIds: polId && polId > 0 ? [polId] : null,
+        EmployeeNo: empCode || null,
+        MemberId: !empCode && pihNumber ? pihNumber : null,
+        Range: 100,
+        StartIndex: 0,
+      };
+
+      const res = await fetch(`${v2Url}/api/v2/BeneficiarySearch/.json`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CA-SHARED-KEY': v2Key,
+          'Payer': trimmedTenantId,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) return [];
+
+      const data = await res.json();
+      const list = data?.beneficiaryDetails || [];
+      if (!Array.isArray(list) || list.length === 0) return [];
+
+      return list.map((b: any) => {
+        const relRaw = String(b.benefRelName || b.Relation || b.relation || 'Self').trim();
+        const relation = relRaw.toLowerCase() === 'self' ? 'Insured' : relRaw;
+        const firstName = String(b.benefName || b.Name || '').trim();
+        const lastName = String(b.benefLastName || '').trim();
+        const fullName = [firstName, lastName].filter(Boolean).join(' ') || 'Insured Member';
+
+        return {
+          MAID: Number(b.benefMediAssistID || b.Maid || b.MAID || 0),
+          BenefUserId: Number(b.benefUserID || b.benefUserId || b.UserId || b.benefMediAssistID || 0),
+          Name: firstName || fullName,
+          Relation: relation,
+          Gender: b.sex || b.Gender || b.benefSex || '',
+          DOB: b.benefDOB ? this.parseDateStr(b.benefDOB) : (b.dob ? String(b.dob) : ''),
+          PIHMemberId: b.benefNIAPersonID || b.priBenefNIAPersonID || '',
+        };
+      }).sort((a: any, b: any) => a.MAID - b.MAID);
+    } catch (err: any) {
+      this.logger.warn(`v2 BeneficiarySearch failed in getMemberClaimData: ${err.message}`, BrokerService.name);
+      return [];
+    }
+  }
+
+  /**
+   * Fallback query to SQL Server database for matching enrolled policy/employee beneficiaries.
+   */
+  private async searchBeneficiariesFromDb(
+    corpId: number | undefined,
+    polId: number | undefined,
+    empCode: string,
+    pihNumber: string | undefined,
+    tenantConfig: TenantConfigTypes,
+  ): Promise<Beneficiaries[]> {
+    const dbConfig = tenantConfig.config?.database;
+    if (!dbConfig || (!empCode && !pihNumber && !polId)) return [];
+
+    try {
+      const pool = await this.sqlServerService.getPool(dbConfig);
+      const req = pool.request();
+      req.input('emp', empCode || '');
+      req.input('pih', pihNumber || '');
+      req.input('polId', polId || 0);
+
+      const qRes = await req.query(`
+        SELECT DISTINCT b.BenefUserID, b.BenefMediAssistID, b.BenefNIAPersonID, b.BenefEmpCode, b.BenefName, b.BenefLastName, b.BenefSex, b.BenefDOB, b.BenefRelName
+        FROM Lawton.dbo.tblmabeneficiary b WITH(NOLOCK)
+        LEFT JOIN Lawton.dbo.tblmapolicy p WITH(NOLOCK) ON b.BenefUserID = p.PolicyUserID
+        WHERE (
+          (@polId > 0 AND (p.MasterPolicyID = @polId OR p.PolicyId = @polId))
+          OR (@emp <> '' AND (b.BenefEmpCode = @emp OR b.BenefEmpCode LIKE @emp + '_%'))
+          OR (@pih <> '' AND (b.BenefNIAPersonID = @pih OR b.BenefNIAPersonID LIKE '%' + @pih))
+        )
+        ORDER BY b.BenefMediAssistID ASC
+      `);
+
+      if (qRes.recordset && qRes.recordset.length > 0) {
+        return qRes.recordset.map((b: any) => {
+          const relRaw = String(b.BenefRelName || 'Self').trim();
+          const relation = relRaw.toLowerCase() === 'self' ? 'Insured' : relRaw;
+          const firstName = String(b.BenefName || '').trim();
+          const lastName = String(b.BenefLastName || '').trim();
+          const fullName = [firstName, lastName].filter(Boolean).join(' ') || 'Insured Member';
+          return {
+            MAID: Number(b.BenefMediAssistID || 0),
+            BenefUserId: Number(b.BenefUserID || 0),
+            Name: firstName || fullName,
+            Relation: relation,
+            Gender: b.BenefSex || '',
+            DOB: b.BenefDOB ? this.parseDateStr(b.BenefDOB) : '',
+            PIHMemberId: b.BenefNIAPersonID || '',
+          };
+        }).sort((a: any, b: any) => a.MAID - b.MAID);
+      }
+    } catch (err: any) {
+      this.logger.warn(`Database fallback failed in searchBeneficiariesFromDb: ${err.message}`, BrokerService.name);
+    }
+    return [];
   }
 
   /**
@@ -1551,6 +1679,229 @@ export class BrokerService {
       isSuccess: true,
       claimRegNo,
       message: isDraft ? 'Draft saved successfully' : 'Claim submitted successfully',
+    };
+  }
+
+  /**
+   * Searches employee policies for claim submission matching the legacy BrokerSubmitClaim flow.
+   */
+  async searchPoliciesForClaim(
+    tenantId: string,
+    user: UserSessionPayload,
+    query: { corpId?: string | number; polId?: string | number; empCode?: string; pihNumber?: string },
+  ) {
+    const startedAt = Date.now();
+    const trimmedTenantId = tenantId.trim();
+    const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
+    const corpId = query.corpId ? Number(query.corpId) : 0;
+    const polId = query.polId ? Number(query.polId) : 0;
+    const empCode = String(query.empCode || '').trim();
+    const pihNumber = String(query.pihNumber || '').trim();
+
+    this.logger.log('Searching employee policies for claim submission', BrokerService.name, {
+      tenantId: trimmedTenantId,
+      corpId,
+      polId,
+      empCode,
+      pihNumber,
+    });
+
+    const v1Url = tenantConfig.config?.claimApis?.v1;
+    const v2Url = tenantConfig.config?.claimApis?.v2;
+    const v2Key = tenantConfig.config?.claimApis?.v2Key || '123412341234';
+
+    let resolvedMaid = 0;
+    let fallbackPih = pihNumber;
+    let fallbackEmpCode = empCode;
+
+    // 1. Primary path: BeneficiarySearch on v2
+    if (v2Url) {
+      try {
+        const payload: Record<string, any> = {
+          EmployeeNo: pihNumber ? null : (empCode || null),
+          MemberId: pihNumber || null,
+          PolicyCorpIds: corpId > 0 ? [corpId] : null,
+          PolicyIds: polId > 0 ? [polId] : null,
+          Range: 100,
+          StartIndex: 0,
+        };
+
+        const res = await fetch(`${v2Url.replace(/\/+$/, '')}/api/v2/BeneficiarySearch/.json`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CA-SHARED-KEY': v2Key,
+            'Payer': trimmedTenantId,
+          },
+          body: JSON.stringify(payload),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const list = data?.beneficiaryDetails || [];
+          if (list.length > 0) {
+            const pri = list.find((b: any) => b.benefRelToPriID === 1 || String(b.benefRelName).toLowerCase() === 'self') || list[0];
+            resolvedMaid = Number(pri.benefMediAssistID || pri.maid || pri.MAID || 0);
+            if (!fallbackPih && pri.benefNIAPersonID) {
+              fallbackPih = String(pri.benefNIAPersonID);
+            }
+            if (!fallbackEmpCode && pri.benefEmpCode) {
+              fallbackEmpCode = String(pri.benefEmpCode);
+            }
+          }
+        }
+      } catch (err: any) {
+        this.logger.warn(`v2 BeneficiarySearch failed in searchPoliciesForClaim: ${err.message}`, BrokerService.name);
+      }
+    }
+
+    // 2. Database fallback if v2 returned 0 MAID
+    if (resolvedMaid === 0) {
+      const dbConfig = tenantConfig.config?.database;
+      if (dbConfig && (empCode || pihNumber)) {
+        try {
+          const pool = await this.sqlServerService.getPool(dbConfig);
+          const req = pool.request();
+          req.input('emp', empCode || '');
+          req.input('pih', pihNumber || '');
+
+          const qRes = await req.query(`
+            SELECT TOP 1 BenefMediAssistID, BenefNIAPersonID, BenefEmpCode
+            FROM Lawton.dbo.tblmabeneficiary WITH(NOLOCK)
+            WHERE (
+              (@pih <> '' AND (BenefNIAPersonID = @pih OR BenefNIAPersonID LIKE '%' + @pih))
+              OR (@emp <> '' AND BenefEmpCode = @emp)
+            )
+            ORDER BY BenefUserID ASC
+          `);
+          if (qRes.recordset?.length > 0) {
+            resolvedMaid = Number(qRes.recordset[0].BenefMediAssistID || 0);
+            if (!fallbackPih) fallbackPih = String(qRes.recordset[0].BenefNIAPersonID || '');
+            if (!fallbackEmpCode) fallbackEmpCode = String(qRes.recordset[0].BenefEmpCode || '');
+          }
+        } catch (dbErr: any) {
+          this.logger.warn(`Database fallback failed in searchPoliciesForClaim: ${dbErr.message}`, BrokerService.name);
+        }
+      }
+    }
+
+    if (resolvedMaid === 0) {
+      this.logger.log(`No MAID found for claim search: empCode=${empCode}, pihNumber=${pihNumber}`, BrokerService.name);
+      return { isSuccess: true, policies: [] };
+    }
+
+    // 3. Fetch Policies for resolvedMaid from v1 /memberportal/search/policybenef/{maid}
+    const policies: any[] = [];
+    if (v1Url) {
+      try {
+        const pRes = await fetch(`${v1Url.replace(/\/+$/, '')}/memberportal/search/policybenef/${encodeURIComponent(resolvedMaid)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ PrimaryMAID: resolvedMaid }),
+        });
+
+        if (pRes.ok) {
+          const pData = await pRes.json();
+          const rawPolicies = pData?.policyBenefDetails || [];
+          for (const item of rawPolicies) {
+            const pol = item.policyDetails || item;
+            const itemPolId = Number(pol.policyId || pol.PolicyId || 0);
+            if (polId > 0 && itemPolId !== polId) {
+              continue;
+            }
+
+            let polExpMonths = Number(pol.polExpMonths ?? pol.PolExpMonths ?? 0);
+            let polExpDays = Number(pol.polExpDays ?? pol.PolExpDays ?? 0);
+            const polHolderName = String(pol.policyHolderName || pol.PolicyHolderName || '').trim();
+            const polHolderAddress = String(pol.policyHolderAddress || pol.PolicyHolderAddress || '').trim();
+            const polNumber = String(pol.policyNumber || pol.PolicyNumber || pol.originalPolicyNo || '').trim();
+            const startDate = pol.startDate || pol.StartDate || (pol.polStartDate ? this.parseDateStr(pol.polStartDate) : '');
+            const endDate = pol.endDate || pol.EndDate || (pol.polEndDate ? this.parseDateStr(pol.polEndDate) : '');
+            const pihMemberId = pol.priBenefNIAPersonID || pol.PriBenefNIAPersonID || fallbackPih;
+
+            if (!polExpMonths && !polExpDays && endDate) {
+              const endD = this.parseDate(endDate);
+              if (endD) {
+                const now = new Date();
+                const diffMs = endD.getTime() - now.getTime();
+                const totalDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                if (totalDays < 0) {
+                  polExpMonths = -1;
+                  polExpDays = -1;
+                } else {
+                  polExpMonths = Math.floor(totalDays / 30);
+                  polExpDays = totalDays;
+                }
+              }
+            }
+
+            policies.push({
+              policyId: itemPolId,
+              policyNumber: polNumber,
+              policyHolderName: polHolderName,
+              policyHolderAddress: polHolderAddress,
+              startDate,
+              endDate,
+              pihMemberId,
+              maid: resolvedMaid,
+              empCode: fallbackEmpCode,
+              expMonths: polExpMonths,
+              expDays: polExpDays,
+              isExpired: polExpMonths < 0 || polExpDays < 0,
+            });
+          }
+        }
+      } catch (pErr: any) {
+        this.logger.warn(`v1 policybenef failed in searchPoliciesForClaim: ${pErr.message}`, BrokerService.name);
+      }
+    }
+
+    // 4. Fallback if v1 returned no policy headers but polId was matched in agent policies
+    if (policies.length === 0 && polId > 0) {
+      const polListRes = await this.getPolicyList(tenantId, user);
+      const match = polListRes?.policies?.find((p: any) => Number(p.polId) === polId);
+      if (match) {
+        policies.push({
+          policyId: polId,
+          policyNumber: match.polNo,
+          policyHolderName: match.polHolderName,
+          policyHolderAddress: '',
+          startDate: typeof match.startDate === 'string' ? match.startDate : this.parseDateStr(match.startDate),
+          endDate: typeof match.endDate === 'string' ? match.endDate : this.parseDateStr(match.endDate),
+          pihMemberId: fallbackPih,
+          maid: resolvedMaid,
+          empCode: fallbackEmpCode,
+          expMonths: 12,
+          expDays: 0,
+          isExpired: false,
+        });
+      }
+    }
+
+    this.logger.log(
+      `searchPoliciesForClaim completed with ${policies.length} policies in ${Date.now() - startedAt}ms`,
+      BrokerService.name,
+      { tenantId: trimmedTenantId, policiesCount: policies.length },
+    );
+
+    return {
+      isSuccess: true,
+      policies,
+    };
+  }
+
+  /**
+   * Returns bill and service categories for OutPatient / Domi claims.
+   */
+  getBillTypes() {
+    return {
+      isSuccess: true,
+      serviceTypes: [
+        { chargeTypeId: 1, name: 'Consultant Charges' },
+        { chargeTypeId: 2, name: 'Investigation & Lab Charges' },
+        { chargeTypeId: 3, name: 'Medicine & Pharmacy' },
+        { chargeTypeId: 4, name: 'Miscellaneous Charges' },
+      ],
     };
   }
 
@@ -2830,8 +3181,11 @@ export class BrokerService {
       }
     }
 
-    // Zero artificial fallbacks: reject if required identifiers cannot be resolved
-    if (!resolvedBenefPriId || !resolvedPolId) {
+    const rawAppId = tenantConfig?.config?.auth?.appId;
+    const appId = rawAppId !== undefined && rawAppId !== null ? String(rawAppId).trim() : '';
+
+    // Zero artificial fallbacks: reject if required identifiers or tenant config cannot be resolved
+    if (!resolvedBenefPriId || !resolvedBenefUserId || !resolvedPolId || !resolvedInsurerId || !appId) {
       return {
         isSuccess: false,
         message: 'Certificate of Insurance data not available for this member.',
@@ -2847,7 +3201,7 @@ export class BrokerService {
       DbType: dbType,
       OutputType: 'PDFByteStream',
       CorporateId: resolvedCorporateId,
-      AppId: '2',
+      AppId: appId,
       PrintPattern: 'Single',
     });
 

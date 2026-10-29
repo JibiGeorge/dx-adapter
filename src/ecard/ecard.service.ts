@@ -233,34 +233,102 @@ export class EcardService {
         },
       );
 
-      const members: EcardMember[] = (searchRes.members || []).map((m: any) => {
-        const isActive =
-          m.memberStatus === 'Active' ||
-          m.isBenefActive === true ||
-          m.policyStatus?.toLowerCase()?.includes('active');
-
+      const rawMembers = searchRes.members || [];
+      if (!rawMembers.length) {
         return {
-          maid: String(m.maid),
-          name: m.name || `${m.firstName || ''} ${m.lastName || ''}`.trim(),
-          firstName: m.firstName,
-          lastName: m.lastName,
-          emailId: m.emailId || '',
-          staffId: m.staffId || '',
-          pihNumber: m.pihNumber || '',
-          relation: m.relation || '',
-          policyStatus: m.policyStatus || '',
-          memberStatus: m.memberStatus || '',
-          polNo: m.polNo || dto.polNo || '',
-          corpName: m.corpName || dto.corpName || '',
-          policyId: m.policyId || dto.polId,
-          insurerId: m.insurerId,
-          priBenefId: m.priBenefId,
-          benefUserId: m.benefUserId,
-          // Document availability flags evaluated against policy authorization
-          isEcardAvailable: isEcardAllowed && Boolean(m.maid && (m.policyId || dto.polId)),
-          isCoiAvailable: isCoiAllowed && Boolean(m.maid && (m.policyId || dto.polId)),
+          isSuccess: false,
+          total: 0,
+          members: [],
+          message: 'No details found',
         };
-      });
+      }
+
+      // Pre-check document availability matching legacy EcardController (IsEcardDocumentAvailable & IsCoverageDocumentAvailable)
+      const tenantConfig = await this.tenantService.getFullTenantById(trimmedTenantId);
+      const rawAppId = tenantConfig?.config?.auth?.appId;
+      const appId = rawAppId !== undefined && rawAppId !== null ? String(rawAppId).trim() : '';
+      const ecardUrl = tenantConfig.config?.services?.ecard || 'https://uat-lawton-core-ecard.lawtonasia.com';
+      const payerKey = tenantConfig.config?.claimApis?.pairKey || trimmedTenantId;
+      const v2Key = tenantConfig.config?.claimApis?.v2Key || '123412341234';
+      const docType = (dto.docType || 'both').toLowerCase();
+      const wantEcard = docType === 'ecard' || docType === 'both' || docType === 'all';
+      const wantCoi = docType === 'coi' || docType === 'both' || docType === 'all';
+
+      const members: EcardMember[] = await Promise.all(
+        rawMembers.map(async (m: any) => {
+          const rawName = (m.name || `${m.firstName || ''} ${m.middleName || ''} ${m.lastName || ''}`).trim();
+          const cleanName = rawName.replace(/\s*undefined\s*/gi, ' ').trim();
+          const rawRel = (m.relation || '').trim();
+          const cleanRelation = rawRel.toLowerCase() === 'self' ? 'Insured' : rawRel;
+
+          const memberPolId = Number(m.policyId || resolvedPolId || effectivePolId || 0);
+          const insurerId = Number(m.insurerId || 0);
+          const priBenefId = Number(m.priBenefId || 0);
+          const benefUserId = Number(m.benefUserId || 0);
+          const corpId = Number(dto.corpId || user.providerCorpId || 0);
+
+          let hasEcard = false;
+          let hasCoi = false;
+
+          if (isLawton) {
+            const [ecardAvailable, coiAvailable] = await Promise.all([
+              wantEcard && isEcardAllowed && m.maid && memberPolId > 0 && insurerId > 0
+                ? this.isEcardDocumentAvailable(
+                    ecardUrl,
+                    payerKey,
+                    v2Key,
+                    String(m.maid),
+                    memberPolId,
+                    insurerId,
+                  )
+                : Promise.resolve(false),
+              wantCoi && isCoiAllowed && priBenefId > 0 && benefUserId > 0 && memberPolId > 0 && insurerId > 0 && Boolean(appId)
+                ? this.isCoverageDocumentAvailable(
+                    ecardUrl,
+                    payerKey,
+                    v2Key,
+                    priBenefId,
+                    benefUserId,
+                    memberPolId,
+                    insurerId,
+                    corpId,
+                    appId,
+                  )
+                : Promise.resolve(false),
+            ]);
+            hasEcard = ecardAvailable;
+            hasCoi = coiAvailable;
+          } else {
+            hasEcard = Boolean(m.maid && memberPolId > 0);
+            hasCoi = Boolean(priBenefId > 0 && benefUserId > 0 && memberPolId > 0);
+          }
+
+          const isDocumentAvailable =
+            docType === 'ecard' ? hasEcard : docType === 'coi' ? hasCoi : (hasEcard || hasCoi);
+
+          return {
+            maid: String(m.maid),
+            name: cleanName || m.name || '',
+            firstName: m.firstName,
+            lastName: m.lastName,
+            emailId: m.emailId || m.benefEmail || '',
+            staffId: m.staffId || m.actualEmpCode || '',
+            pihNumber: m.pihNumber || m.benefNIAPersonID || m.insurerBenefNumber || '',
+            relation: cleanRelation,
+            policyStatus: m.policyStatus || '',
+            memberStatus: m.memberStatus || '',
+            polNo: m.polNo || dto.polNo || '',
+            corpName: m.corpName || dto.corpName || '',
+            policyId: memberPolId,
+            insurerId,
+            priBenefId,
+            benefUserId,
+            isDocumentAvailable,
+            isEcardAvailable: hasEcard,
+            isCoiAvailable: hasCoi,
+          };
+        }),
+      );
 
       return {
         isSuccess: true,
@@ -279,6 +347,184 @@ export class EcardService {
         members: [],
         message: 'Unable to search e-card records at this time.',
       };
+    }
+  }
+
+  /**
+   * Validates whether raw file bytes represent a valid PDF.
+   */
+  private isValidPdfBytes(bytes: any): boolean {
+    if (!bytes) return false;
+    if (Buffer.isBuffer(bytes)) {
+      return bytes.length > 4 && bytes.toString('utf8', 0, 4) === '%PDF';
+    }
+    if (Array.isArray(bytes)) {
+      return (
+        bytes.length > 4 &&
+        bytes[0] === 0x25 &&
+        bytes[1] === 0x50 &&
+        bytes[2] === 0x44 &&
+        bytes[3] === 0x46
+      );
+    }
+    if (typeof bytes === 'string') {
+      const clean = bytes.replace(/^data:application\/pdf;base64,/, '').trim();
+      if (!clean) return false;
+      try {
+        const header = Buffer.from(clean.slice(0, 10), 'base64').toString('utf8');
+        return header.startsWith('%PDF');
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Pre-checks whether E-Card PDF exists and contains valid PDF bytes.
+   */
+  private async isEcardDocumentAvailable(
+    ecardUrl: string,
+    payerKey: string,
+    v2Key: string,
+    maid: string,
+    polId: number,
+    insurerId: string | number,
+  ): Promise<boolean> {
+    try {
+      if (!maid || !polId || !insurerId) return false;
+      const payload = {
+        printRequest: {
+          executionMode: 'Single',
+          identifierType: 'MemberId',
+          identifierValue: String(maid),
+          printPattern: 'Single',
+        },
+        isPasswordEnabled: false,
+        printExpiredPolicy: false,
+        policyId: Number(polId),
+        insurerId: String(insurerId),
+        dbType: 'MA',
+        outputType: 'PDFByteStream',
+      };
+
+      // 1. Try Lawton /Test/downloadECard
+      let res = await fetch(`${ecardUrl.replace(/\/+$/, '')}/Test/downloadECard`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Payer: payerKey,
+          'X-CA-SHARED-KEY': v2Key,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok && res.status !== 204) {
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/pdf')) {
+          const ab = await res.arrayBuffer();
+          return this.isValidPdfBytes(Buffer.from(ab));
+        }
+        const json = await res.json().catch(() => null);
+        const fileBytes = json?.data?.[0]?.printResponse?.fileBytes;
+        if (this.isValidPdfBytes(fileBytes)) return true;
+      }
+
+      // 2. Fallback to /printRetailEcard
+      res = await fetch(`${ecardUrl.replace(/\/+$/, '')}/printRetailEcard`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Payer: payerKey,
+          'X-CA-SHARED-KEY': v2Key,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok && res.status !== 204) {
+        const json = await res.json().catch(() => null);
+        const fileBytes = json?.data?.[0]?.printResponse?.fileBytes;
+        if (this.isValidPdfBytes(fileBytes)) return true;
+      }
+
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Pre-checks whether Certificate of Insurance (COI) PDF exists and contains valid PDF bytes.
+   */
+  private async isCoverageDocumentAvailable(
+    ecardUrl: string,
+    payerKey: string,
+    v2Key: string,
+    priBenefId: number | undefined,
+    benefUserId: number | undefined,
+    polId: number,
+    insurerId: string | number | undefined,
+    corpId: number | undefined,
+    appId: string,
+  ): Promise<boolean> {
+    try {
+      const numPriBenefId = Number(priBenefId);
+      const numBenefUserId = Number(benefUserId);
+      const numPolId = Number(polId);
+      const numInsurerId = Number(insurerId);
+      if (!numPriBenefId || !numBenefUserId || !numPolId || !numInsurerId || !appId?.trim()) {
+        return false;
+      }
+      const buildPayload = (dbType: string) => ({
+        PribenefId: numPriBenefId,
+        BenefId: numBenefUserId,
+        MemberPolicyId: numPolId,
+        MasterPolicyId: numPolId,
+        InsurerId: numInsurerId,
+        DbType: dbType,
+        OutputType: 'PDFByteStream',
+        CorporateId: Number(corpId || 0),
+        AppId: appId.trim(),
+        PrintPattern: 'Single',
+      });
+
+      // 1. Try with DbType MAYFAIR
+      let res = await fetch(`${ecardUrl.replace(/\/+$/, '')}/mwc/printCoverageLetter`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Payer: payerKey,
+          'X-CA-SHARED-KEY': v2Key,
+        },
+        body: JSON.stringify(buildPayload('MAYFAIR')),
+      });
+
+      if (res.ok && res.status !== 204) {
+        const json = await res.json().catch(() => null);
+        const fileBytes = json?.data?.[0]?.printResponse?.fileBytes;
+        if (this.isValidPdfBytes(fileBytes)) return true;
+      }
+
+      // 2. Try with DbType MA
+      res = await fetch(`${ecardUrl.replace(/\/+$/, '')}/mwc/printCoverageLetter`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Payer: payerKey,
+          'X-CA-SHARED-KEY': v2Key,
+        },
+        body: JSON.stringify(buildPayload('MA')),
+      });
+
+      if (res.ok && res.status !== 204) {
+        const json = await res.json().catch(() => null);
+        const fileBytes = json?.data?.[0]?.printResponse?.fileBytes;
+        if (this.isValidPdfBytes(fileBytes)) return true;
+      }
+
+      return false;
+    } catch {
+      return false;
     }
   }
 
